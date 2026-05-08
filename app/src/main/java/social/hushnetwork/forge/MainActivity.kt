@@ -15,6 +15,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -119,7 +120,22 @@ class MainActivity : Activity() {
         }
         root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        header.addView(text("FORGE", 22, color(0xff5a2f), Typeface.BOLD))
+        val brandRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        brandRow.addView(
+            ImageView(this).apply {
+                setImageResource(R.drawable.forge_logo)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                rightMargin = dp(8)
+            }
+        )
+        brandRow.addView(text("FORGE", 22, color(0xff5a2f), Typeface.BOLD))
+        header.addView(brandRow)
         header.addView(text("Native Android WalletConnect dApp", 13, color(0xb4bbc6), Typeface.NORMAL).apply {
             setPadding(0, dp(2), 0, dp(12))
         })
