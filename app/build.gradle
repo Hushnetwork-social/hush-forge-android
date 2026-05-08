@@ -1,0 +1,58 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+}
+
+android {
+    namespace "social.hushnetwork.forge"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "social.hushnetwork.forge"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0-poc"
+
+        buildConfigField "String", "DEFAULT_RPC_URL", "\"https://seek-some-patent-avoid.trycloudflare.com/\""
+        buildConfigField "String", "REOWN_PROJECT_ID", "\"a9ff54e3d56a52230ed8767db4d4a810\""
+        buildConfigField "String", "WALLETCONNECT_CHAIN_ID", "\"neo3:private\""
+        buildConfigField "String", "NEON_PACKAGE", "\"io.cityofzion.neon\""
+        buildConfigField "int", "EXPECTED_NETWORK_MAGIC", "5195086"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    packaging {
+        jniLibs.pickFirsts.add("lib/arm64-v8a/libuniffi_yttrium.so")
+        jniLibs.pickFirsts.add("lib/armeabi-v7a/libuniffi_yttrium.so")
+        jniLibs.pickFirsts.add("lib/x86_64/libuniffi_yttrium.so")
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+}
+
+dependencies {
+    implementation platform("com.reown:android-bom:1.6.13")
+    implementation "com.reown:android-core"
+    implementation "com.reown:appkit"
+    implementation "com.reown:sign"
+    implementation "androidx.activity:activity-ktx:1.12.0"
+    implementation "androidx.core:core-ktx:1.17.0"
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.9.3"
+}
