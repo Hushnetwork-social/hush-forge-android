@@ -36,5 +36,10 @@
                 <data android:scheme="hushforge" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".PocActivity"
+            android:exported="false"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
+            android:launchMode="singleTask" />
     </application>
 </manifest>

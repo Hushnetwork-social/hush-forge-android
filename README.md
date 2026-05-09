@@ -46,10 +46,32 @@ adb install -r .\app\build\outputs\apk\debug\app-debug.apk
 adb shell monkey -p social.hushnetwork.forge -c android.intent.category.LAUNCHER 1
 ```
 
+## Market Activity
+
+The native Trade tab can use a FORGE market activity API when one is configured:
+
+```text
+/api/markets/{tokenHash}/activity?routerHash={routerHash}
+```
+
+The API is optional for now. Configure it at build time when that service is
+available:
+
+```powershell
+$env:FORGE_ACTIVITY_API_BASE_URL='https://your-forge-api.example'
+.\gradlew.bat :app:assembleDebug
+```
+
+If the API base is intentionally blank, the app falls back to direct Neo RPC
+event replay and builds the minimum 15m candle model from the current FORGE
+private-net trade events. The future API path can add multiple intervals,
+server-side caching, richer history, holders, and trader rankings.
+
 ## Private-Net Testing
 
 See:
 
 - [docs/PrivateNet-Setup.md](docs/PrivateNet-Setup.md)
 - [docs/POC-WalletConnect-Neon.md](docs/POC-WalletConnect-Neon.md)
+- [docs/Mobile-Harness-Wallet.md](docs/Mobile-Harness-Wallet.md)
 - [docs/Roadmap.md](docs/Roadmap.md)

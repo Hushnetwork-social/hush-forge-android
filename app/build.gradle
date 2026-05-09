@@ -3,6 +3,16 @@ plugins {
     id "org.jetbrains.kotlin.android"
 }
 
+def mobileWalletHarnessPairUrl = providers.environmentVariable("FORGE_MOBILE_WALLET_HARNESS_PAIR_URL")
+        .orElse(providers.gradleProperty("forgeMobileWalletHarnessPairUrl"))
+        .getOrElse("")
+def forgeActivityApiBaseUrl = providers.environmentVariable("FORGE_ACTIVITY_API_BASE_URL")
+        .orElse(providers.gradleProperty("forgeActivityApiBaseUrl"))
+        .getOrElse("")
+def forgeMarketReferenceApiBaseUrl = providers.environmentVariable("FORGE_MARKET_REFERENCE_API_BASE_URL")
+        .orElse(providers.gradleProperty("forgeMarketReferenceApiBaseUrl"))
+        .getOrElse("")
+
 android {
     namespace "social.hushnetwork.forge"
     compileSdk 36
@@ -18,6 +28,11 @@ android {
         buildConfigField "String", "REOWN_PROJECT_ID", "\"a9ff54e3d56a52230ed8767db4d4a810\""
         buildConfigField "String", "WALLETCONNECT_CHAIN_ID", "\"neo3:private\""
         buildConfigField "String", "NEON_PACKAGE", "\"io.cityofzion.neon\""
+        buildConfigField "String", "FACTORY_CONTRACT_HASH", "\"0x37adad29af3e9b07271d9fdcce544a89a41d12e6\""
+        buildConfigField "String", "BONDING_CURVE_ROUTER_HASH", "\"0x830f1cddb1fdb783205fdc31fd2ec2723aae1e5a\""
+        buildConfigField "String", "MOBILE_WALLET_HARNESS_PAIR_URL", "\"${mobileWalletHarnessPairUrl.replace("\"", "\\\"")}\""
+        buildConfigField "String", "FORGE_ACTIVITY_API_BASE_URL", "\"${forgeActivityApiBaseUrl.replace("\"", "\\\"")}\""
+        buildConfigField "String", "FORGE_MARKET_REFERENCE_API_BASE_URL", "\"${forgeMarketReferenceApiBaseUrl.replace("\"", "\\\"")}\""
         buildConfigField "int", "EXPECTED_NETWORK_MAGIC", "5195086"
     }
 
