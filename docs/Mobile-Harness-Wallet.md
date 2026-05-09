@@ -52,15 +52,16 @@ E2E matrix. Run broad E2E locally.
 1. Start the Neo3 private network.
 2. Start the local WalletConnect relay and wallet harness from
    `hush-forge-wallet-harness`.
-3. Build the Android APK with:
+3. Enable KVM on the GitHub-hosted Ubuntu runner before starting the emulator.
+4. Build the Android APK with:
    - `FORGE_DEFAULT_RPC_URL=http://10.0.2.2:10332`
    - `FORGE_REOWN_RELAY_URL=ws://10.0.2.2:32102?projectId=forge-local-project`
    - `FORGE_MOBILE_WALLET_HARNESS_PAIR_URL=http://10.0.2.2:32103/pair`
-4. Install and launch the APK on the emulator.
-5. Tap `Connect`.
-6. The Android app sends the WalletConnect URI to the harness.
-7. The harness approves `neo3:private` for the default funded account.
-8. The CI smoke verifies connection and token loading without Neon Mobile.
+5. Install and launch the APK on the emulator.
+6. Tap `Connect`.
+7. The Android app sends the WalletConnect URI to the harness.
+8. The harness approves `neo3:private` for the default funded account.
+9. The CI smoke verifies connection and token loading without Neon Mobile.
 
 ## Shared Behavior
 
