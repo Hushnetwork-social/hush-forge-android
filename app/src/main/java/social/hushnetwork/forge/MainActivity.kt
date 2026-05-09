@@ -227,6 +227,7 @@ class MainActivity : ComponentActivity() {
         top.addView(text("FORGE", 20, ORANGE, Typeface.BOLD), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         connectButton = smallButton("Connect").apply {
+            isEnabled = ForgeWalletConnect.isReady
             setOnClickListener {
                 if (connectedWalletAddress == null) connectNeon() else disconnectWallet()
             }
@@ -2303,6 +2304,7 @@ class MainActivity : ComponentActivity() {
         connectedWalletAddress = signAddress ?: account?.address ?: appKitSessionAddress
         connectedChainId = signChainId ?: account?.chain?.id ?: appKitSessionChainId
         connectButton.text = connectedWalletAddress?.let { compactAddress(it) } ?: "Connect"
+        connectButton.isEnabled = connectedWalletAddress != null || ForgeWalletConnect.isReady
         syncWalletNetworkValidation(
             listOfNotNull(signSession?.topic, connectedChainId, connectedWalletAddress)
                 .joinToString("|")

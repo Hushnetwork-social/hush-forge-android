@@ -41,7 +41,9 @@ class ForgeMobileHarnessSmokeTest {
         waitForText("FORGE")
         waitForText("NEO3 PRIVATE")
 
-        device.findObject(By.text("Connect"))?.click()
+        checkNotNull(device.wait(Until.findObject(By.text("Connect").enabled(true)), 120_000)) {
+            "Timed out waiting for WalletConnect to be ready."
+        }.click()
 
         assertNotNull(
             "Expected WalletConnect harness session to expose the private-net account.",
