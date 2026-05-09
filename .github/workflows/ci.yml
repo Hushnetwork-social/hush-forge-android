@@ -115,6 +115,7 @@ jobs:
         run: |
           FORGE_WALLET_HARNESS_RPC_URL=http://127.0.0.1:10332 \
           FORGE_WALLET_HARNESS_REOWN_PROJECT_ID=forge-local-project \
+          FORGE_WALLET_HARNESS_RELAY_DEBUG=true \
           npm run dev:server > ../wallet-harness.log 2>&1 &
 
       - name: Wait for harness pair endpoint
@@ -140,10 +141,10 @@ jobs:
       - name: Run mobile harness smoke test
         uses: reactivecircus/android-emulator-runner@v2
         env:
-          FORGE_DEFAULT_RPC_URL: http://10.0.2.2:10332
+          FORGE_DEFAULT_RPC_URL: http://127.0.0.1:10332
           FORGE_REOWN_PROJECT_ID: forge-local-project
-          FORGE_REOWN_RELAY_URL: ws://10.0.2.2:32102?projectId=forge-local-project
-          FORGE_MOBILE_WALLET_HARNESS_PAIR_URL: http://10.0.2.2:32103/pair
+          FORGE_REOWN_RELAY_URL: ws://127.0.0.1:32102?projectId=forge-local-project
+          FORGE_MOBILE_WALLET_HARNESS_PAIR_URL: http://127.0.0.1:32103/pair
         with:
           api-level: 29
           arch: x86_64
@@ -159,6 +160,9 @@ jobs:
           script: |
             mkdir -p app/build/outputs/androidTest-results/connected
             adb logcat -c
+            adb reverse tcp:10332 tcp:10332
+            adb reverse tcp:32102 tcp:32102
+            adb reverse tcp:32103 tcp:32103
             adb logcat -v time > app/build/outputs/androidTest-results/connected/logcat.txt &
             LOGCAT_PID=$!
             ./gradlew :app:connectedDebugAndroidTest --stacktrace
