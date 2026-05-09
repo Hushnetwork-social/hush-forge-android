@@ -158,18 +158,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -camera-back none
           disable-animations: true
           script: |
-            mkdir -p app/build/outputs/androidTest-results/connected
-            adb logcat -c
-            adb reverse tcp:10332 tcp:10332
-            adb reverse tcp:32102 tcp:32102
-            adb reverse tcp:32103 tcp:32103
-            adb logcat -v time > app/build/outputs/androidTest-results/connected/logcat.txt &
-            LOGCAT_PID=$!
-            ./gradlew :app:connectedDebugAndroidTest --stacktrace
-            TEST_STATUS=$?
-            kill "$LOGCAT_PID" || true
-            wait "$LOGCAT_PID" || true
-            exit "$TEST_STATUS"
+            bash -c 'set -e; mkdir -p app/build/outputs/androidTest-results/connected; adb logcat -c; adb reverse tcp:10332 tcp:10332; adb reverse tcp:32102 tcp:32102; adb reverse tcp:32103 tcp:32103; adb logcat -v time > app/build/outputs/androidTest-results/connected/logcat.txt & LOGCAT_PID=$!; set +e; ./gradlew :app:connectedDebugAndroidTest --stacktrace; TEST_STATUS=$?; kill "$LOGCAT_PID" || true; wait "$LOGCAT_PID" || true; exit "$TEST_STATUS"'
 
       - name: Upload mobile harness artifacts
         if: always()
