@@ -60,8 +60,6 @@ jobs:
     steps:
       - name: Checkout Android app
         uses: actions/checkout@v4
-        with:
-          path: hush-forge-android
 
       - name: Checkout FORGE wallet harness
         uses: actions/checkout@v4
@@ -131,22 +129,20 @@ jobs:
           exit 1
 
       - name: Prepare Gradle wrapper
-        working-directory: hush-forge-android
         run: chmod +x ./gradlew
 
       - name: Run mobile harness smoke test
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          FORGE_DEFAULT_RPC_URL: http://10.0.2.2:10332
+          FORGE_REOWN_PROJECT_ID: forge-local-project
+          FORGE_REOWN_RELAY_URL: ws://10.0.2.2:32102?projectId=forge-local-project
+          FORGE_MOBILE_WALLET_HARNESS_PAIR_URL: http://10.0.2.2:32103/pair
         with:
           api-level: 35
           arch: x86_64
           profile: pixel_5
-          script: |
-            cd hush-forge-android
-            FORGE_DEFAULT_RPC_URL=http://10.0.2.2:10332 \
-            FORGE_REOWN_PROJECT_ID=forge-local-project \
-            FORGE_REOWN_RELAY_URL='ws://10.0.2.2:32102?projectId=forge-local-project' \
-            FORGE_MOBILE_WALLET_HARNESS_PAIR_URL=http://10.0.2.2:32103/pair \
-            ./gradlew :app:connectedDebugAndroidTest --stacktrace
+          script: ./gradlew :app:connectedDebugAndroidTest --stacktrace
 
       - name: Upload mobile harness artifacts
         if: always()
@@ -156,8 +152,8 @@ jobs:
           if-no-files-found: ignore
           path: |
             wallet-harness.log
-            hush-forge-android/app/build/reports/androidTests/
-            hush-forge-android/app/build/outputs/androidTest-results/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
 
       - name: Stop private network
         if: always()
