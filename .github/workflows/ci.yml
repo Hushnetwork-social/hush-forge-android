@@ -1,0 +1,165 @@
+name: HushForgeAndroid CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Android app
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Gradle wrapper
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Upload Android build reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hush-forge-android-build-reports
+          if-no-files-found: ignore
+          path: |
+            app/build/reports/
+            app/build/test-results/
+
+  mobile-harness-smoke:
+    name: Mobile harness happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Android app
+        uses: actions/checkout@v4
+        with:
+          path: hush-forge-android
+
+      - name: Checkout FORGE wallet harness
+        uses: actions/checkout@v4
+        with:
+          repository: Hushnetwork-social/hush-forge-wallet-harness
+          path: hush-forge-wallet-harness
+
+      - name: Checkout Neo3 private network
+        uses: actions/checkout@v4
+        with:
+          repository: AxLabs/neo3-privatenet-docker
+          path: neo3-privatenet-docker
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: hush-forge-wallet-harness/package-lock.json
+
+      - name: Install wallet harness dependencies
+        working-directory: hush-forge-wallet-harness
+        run: npm ci
+
+      - name: Start Neo3 private network
+        run: docker compose up --detach
+        working-directory: neo3-privatenet-docker
+
+      - name: Wait for Neo3 RPC
+        run: |
+          for attempt in {1..60}; do
+            if curl --silent --fail \
+              --header 'Content-Type: application/json' \
+              --data '{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}' \
+              http://127.0.0.1:10332/ >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Start local WalletConnect harness
+        working-directory: hush-forge-wallet-harness
+        run: |
+          FORGE_WALLET_HARNESS_RPC_URL=http://127.0.0.1:10332 \
+          FORGE_WALLET_HARNESS_REOWN_PROJECT_ID=forge-local-project \
+          npm run dev:server > ../wallet-harness.log 2>&1 &
+
+      - name: Wait for harness pair endpoint
+        run: |
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:32103/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat wallet-harness.log || true
+          exit 1
+
+      - name: Prepare Gradle wrapper
+        working-directory: hush-forge-android
+        run: chmod +x ./gradlew
+
+      - name: Run mobile harness smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_5
+          script: |
+            cd hush-forge-android
+            FORGE_DEFAULT_RPC_URL=http://10.0.2.2:10332 \
+            FORGE_REOWN_PROJECT_ID=forge-local-project \
+            FORGE_REOWN_RELAY_URL='ws://10.0.2.2:32102?projectId=forge-local-project' \
+            FORGE_MOBILE_WALLET_HARNESS_PAIR_URL=http://10.0.2.2:32103/pair \
+            ./gradlew :app:connectedDebugAndroidTest --stacktrace
+
+      - name: Upload mobile harness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hush-forge-android-mobile-harness-artifacts
+          if-no-files-found: ignore
+          path: |
+            wallet-harness.log
+            hush-forge-android/app/build/reports/androidTests/
+            hush-forge-android/app/build/outputs/androidTest-results/
+
+      - name: Stop private network
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+        working-directory: neo3-privatenet-docker

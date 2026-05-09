@@ -1,6 +1,5 @@
 package social.hushnetwork.forge
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -13,10 +12,15 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
@@ -25,20 +29,29 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import com.reown.android.CoreClient
 import com.reown.appkit.client.AppKit
 import com.reown.appkit.client.Modal
 import com.reown.appkit.client.models.Session
+import com.reown.appkit.client.models.request.Request
+import com.reown.appkit.client.models.request.SentRequestResult
 import com.reown.sign.client.Sign
 import com.reown.sign.client.SignClient
+import java.math.BigDecimal
 import java.math.BigInteger
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONArray
+import org.json.JSONObject
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val repository = ForgeChainRepository()
     private val refreshHandler = Handler(Looper.getMainLooper())
@@ -54,6 +67,8 @@ class MainActivity : Activity() {
             refreshHandler.postDelayed(this, QUOTE_USD_REFRESH_INTERVAL_MS)
         }
     }
+    private val tradeQuoteHandler = Handler(Looper.getMainLooper())
+    private val pendingTradeRequests = mutableMapOf<Long, PendingTradeRequest>()
 
     private lateinit var root: LinearLayout
     private lateinit var content: LinearLayout
@@ -68,9 +83,14 @@ class MainActivity : Activity() {
     private var selectedPairFilter = PairFilter.TRENDING
     private var selectedPairHash: String? = null
     private var selectedDetailTab = DetailTab.TRADE
+    private var selectedActivityTab = ActivityTab.TRADE_HISTORY
+    private var selectedActivityRowId: String? = null
     private val marketCandlesByToken = mutableMapOf<String, List<ForgeMarketCandle>>()
     private val loadingMarketCandles = mutableSetOf<String>()
     private val marketCandleErrors = mutableMapOf<String, String>()
+    private val marketActivityByToken = mutableMapOf<String, ForgeMarketActivity>()
+    private val loadingMarketActivity = mutableSetOf<String>()
+    private val marketActivityErrors = mutableMapOf<String, String>()
     private var dashboard: ForgeDashboard? = null
     private var loading = false
     private var refreshTimerStarted = false
@@ -78,10 +98,38 @@ class MainActivity : Activity() {
     private var selectedPriceDisplay = PriceDisplayMode.QUOTE
     private var connectedWalletAddress: String? = null
     private var connectedChainId: String? = null
+    private var selectedTradeSide = TradeSide.BUY
+    private var tradeAmountInput = ""
+    private var tradeQuote: ForgeTradeQuote? = null
+    private var tradeQuoteLoading = false
+    private var tradeQuoteError: String? = null
+    private var tradeSubmitting = false
+    private var tradeStatusMessage: String? = null
+    private var tradeStatusIsError = false
+    private var tradeQuoteRequestKey: String? = null
+    private var walletNetworkMagic: Int? = null
+    private var walletNetworkValidationMessage: String? = null
+    private var walletNetworkValidationError = false
+    private var pendingNetworkVersionRequestId: Long? = null
+    private var networkVersionValidationSessionKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        selectedPriceDisplay = loadPriceDisplayMode()
         setContentView(buildLayout())
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (selectedPairHash != null) {
+                    selectedPairHash = null
+                    selectedDetailTab = DetailTab.TRADE
+                    render()
+                    return
+                }
+
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+            }
+        })
 
         ForgeWalletConnectDelegate.onEvent = {
             refreshSessionUi()
@@ -89,6 +137,9 @@ class MainActivity : Activity() {
         ForgeWalletConnectDelegate.onSessionChanged = {
             refreshSessionUi()
             loadDashboard()
+        }
+        ForgeWalletConnectDelegate.onSessionRequestResponse = { response ->
+            handleWalletRequestResponse(response)
         }
 
         handleDeepLink(intent)
@@ -123,20 +174,11 @@ class MainActivity : Activity() {
         if (isFinishing) {
             ForgeWalletConnectDelegate.onEvent = null
             ForgeWalletConnectDelegate.onSessionChanged = null
+            ForgeWalletConnectDelegate.onSessionRequestResponse = null
         }
+        tradeQuoteHandler.removeCallbacksAndMessages(null)
         executor.shutdownNow()
         super.onDestroy()
-    }
-
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        if (selectedPairHash != null) {
-            selectedPairHash = null
-            selectedDetailTab = DetailTab.TRADE
-            render()
-            return
-        }
-        super.onBackPressed()
     }
 
     private fun buildLayout(): View {
@@ -317,6 +359,33 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun loadMarketActivity(pair: ForgePair, force: Boolean = false) {
+        val tokenHash = pair.token.contractHash.lowercase(Locale.US)
+        if ((!force && marketActivityByToken.containsKey(tokenHash)) || loadingMarketActivity.contains(tokenHash)) {
+            return
+        }
+
+        loadingMarketActivity += tokenHash
+        marketActivityErrors.remove(tokenHash)
+
+        executor.submit {
+            try {
+                val activity = repository.loadMarketActivity(pair)
+                runOnUiThread {
+                    loadingMarketActivity -= tokenHash
+                    marketActivityByToken[tokenHash] = activity
+                    render()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    loadingMarketActivity -= tokenHash
+                    marketActivityErrors[tokenHash] = error.message ?: error.javaClass.simpleName
+                    render()
+                }
+            }
+        }
+    }
+
     private fun refreshVisibleMarketData() {
         val activePairHash = selectedPairHash ?: return
         if (loading) return
@@ -326,7 +395,12 @@ class MainActivity : Activity() {
                 it.token.contractHash.equals(activePairHash, ignoreCase = true)
             }
             if (refreshedPair != null) {
-                loadMarketCandles(refreshedPair, force = true)
+                if (selectedDetailTab == DetailTab.TRADE) {
+                    loadMarketCandles(refreshedPair, force = true)
+                }
+                if (selectedDetailTab == DetailTab.DETAILS) {
+                    loadMarketActivity(refreshedPair, force = true)
+                }
             }
         }
     }
@@ -388,12 +462,13 @@ class MainActivity : Activity() {
             else -> chain.uppercase(Locale.US)
         }
         val fill = when {
+            walletNetworkValidationError -> ERROR
             "main" in normalized -> GREEN
             "test" in normalized -> GOLD
             "private" in normalized -> NETWORK_PRIVATE
             else -> color(0x4c5664)
         }
-        networkBadge.text = label
+        networkBadge.text = if (walletNetworkValidationError) "NETWORK CHECK" else label
         networkBadge.background = rounded(fill, dp(11), fill, 0)
         if (::networkLine.isInitialized) {
             networkLine.setBackgroundColor(fill)
@@ -605,6 +680,11 @@ class MainActivity : Activity() {
         }
 
     private fun openPairDetail(pair: ForgePair) {
+        if (!selectedPairHash.equals(pair.token.contractHash, ignoreCase = true)) {
+            resetTradeState()
+            selectedActivityTab = ActivityTab.TRADE_HISTORY
+            selectedActivityRowId = null
+        }
         selectedPairHash = pair.token.contractHash
         selectedDetailTab = DetailTab.TRADE
         loadMarketCandles(pair)
@@ -729,6 +809,7 @@ class MainActivity : Activity() {
                 } else {
                     PriceDisplayMode.USD
                 }
+                savePriceDisplayMode(selectedPriceDisplay)
                 if (selectedPriceDisplay == PriceDisplayMode.USD) {
                     refreshQuoteUsdReferences(force = true)
                     if (QuoteAssetUsdReferenceStore.reference(quoteAsset) == null) {
@@ -787,70 +868,716 @@ class MainActivity : Activity() {
         }
 
     private fun renderDetailTrade(pair: ForgePair) {
+        ensureTradeQuote(pair)
+        val quote = tradeQuote?.takeIf { it.requestKey == currentTradeRequestKey(pair) }
+        val validation = tradeValidationMessage(pair, quote)
+        val isBuy = selectedTradeSide == TradeSide.BUY
+        val canSubmit = connectedWalletAddress != null &&
+            quote != null &&
+            validation == null &&
+            !tradeQuoteLoading &&
+            !tradeSubmitting
+
         content.addView(tradingChartCard(pair))
         content.addView(card().apply {
             addView(text("Buy / Sell", 18, TEXT, Typeface.BOLD))
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                addView(primaryButton("Buy"), LinearLayout.LayoutParams(0, dp(42), 1f))
-                addView(ghostButton("Sell"), LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(8) })
+                addView(tradeSideButton("Buy", TradeSide.BUY), LinearLayout.LayoutParams(0, dp(42), 1f))
+                addView(tradeSideButton("Sell", TradeSide.SELL), LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(8) })
             }.withTopPadding(12))
-            addView(text("Quote in ${pair.quoteAsset}", 12, MUTED, Typeface.BOLD).withTopPadding(14))
-            addView(text("0 ${pair.quoteAsset}", 18, TEXT, Typeface.BOLD).apply {
-                setPadding(dp(14), dp(12), dp(14), dp(12))
-                background = rounded(SURFACE_DARK, dp(8), BORDER, 1)
-            }.withTopPadding(8))
+            addView(text(
+                if (isBuy) "Quote in ${pair.quoteAsset}" else "Token in ${pair.token.symbol}",
+                12,
+                MUTED,
+                Typeface.BOLD
+            ).withTopPadding(14))
+            addView(tradeAmountField(pair), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply {
+                topMargin = dp(8)
+            })
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                listOf("0.1", "0.5", "1").forEachIndexed { index, preset ->
-                    addView(ghostButton("$preset ${pair.quoteAsset}"), LinearLayout.LayoutParams(0, dp(36), 1f).apply {
-                        if (index > 0) leftMargin = dp(8)
-                    })
+                if (isBuy) {
+                    listOf("0.1", "0.5", "1").forEachIndexed { index, preset ->
+                        addView(ghostButton("$preset ${pair.quoteAsset}").apply {
+                            setOnClickListener { applyBuyPreset(pair, preset) }
+                        }, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                            if (index > 0) leftMargin = dp(8)
+                        })
+                    }
+                } else {
+                    listOf(25, 50, 75, 100).forEachIndexed { index, preset ->
+                        addView(ghostButton("$preset%").apply {
+                            setOnClickListener { applySellPreset(pair, preset) }
+                        }, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                            if (index > 0) leftMargin = dp(8)
+                        })
+                    }
                 }
             }.withTopPadding(10))
+
+            if (tradeQuoteLoading) {
+                addView(text("Refreshing trade preview...", 12, MUTED, Typeface.NORMAL).withTopPadding(10))
+            }
+            val status = tradeStatusMessage ?: tradeQuoteError ?: validation
+            if (status != null) {
+                addView(text(status, 12, if (tradeStatusIsError || tradeQuoteError != null || validation != null) ERROR else MUTED, Typeface.BOLD).withTopPadding(10))
+            }
+
             addView(metricGrid(
-                "Expected out", "-",
-                "Minimum", "-",
-                "Impact", "-",
-                "Slippage", "1%"
+                if (isBuy) "Expected out" else "Expected quote",
+                expectedTradeOutputLabel(pair, quote),
+                if (isBuy) "Minimum" else "Minimum quote",
+                minimumTradeOutputLabel(pair, quote),
+                "Impact", priceImpactLabel(pair, quote),
+                "Slippage", "${DEFAULT_SLIPPAGE_BPS / 100}%"
             ).withTopPadding(14))
-            addView(primaryButton("Buy ${pair.token.symbol}").apply {
+
+            addView(metricGrid(
+                if (isBuy) "Quote consumed" else "Gross quote",
+                grossTradeQuoteLabel(pair, quote),
+                "TokenOwner fee",
+                quote?.let { formatTradeQuoteAmount(it.creatorFee, "GAS") } ?: "-",
+                "Platform fee",
+                quote?.let { formatTradeQuoteAmount(it.platformFee, "GAS") } ?: "-",
+                "Next price",
+                nextTradePriceLabel(pair, quote)
+            ).withTopPadding(12))
+
+            addView(primaryButton(tradeCtaLabel(pair)).apply {
+                isEnabled = connectedWalletAddress == null || canSubmit
+                if (!isEnabled) {
+                    setTextColor(MUTED)
+                    background = rounded(ORANGE_MUTED, dp(8), ORANGE_MUTED, 0)
+                }
                 setOnClickListener {
-                    Toast.makeText(this@MainActivity, "WalletConnect market signing comes next.", Toast.LENGTH_SHORT).show()
+                    if (connectedWalletAddress == null) {
+                        connectNeon()
+                    } else {
+                        submitMarketTrade(pair)
+                    }
                 }
             }, fullButtonParams(top = 14))
         })
     }
 
-    private fun renderDetailInfo(pair: ForgePair) {
-        val token = dashboard?.tokens
+    private fun tradeSideButton(label: String, side: TradeSide): Button {
+        val active = selectedTradeSide == side
+        return (if (active) primaryButton(label) else ghostButton(label)).apply {
+            setOnClickListener {
+                if (selectedTradeSide == side) return@setOnClickListener
+                selectedTradeSide = side
+                tradeAmountInput = ""
+                tradeQuote = null
+                tradeQuoteError = null
+                tradeStatusMessage = null
+                tradeStatusIsError = false
+                render()
+            }
+        }
+    }
+
+    private fun tradeAmountField(pair: ForgePair): EditText =
+        EditText(this).apply {
+            setText(tradeAmountInput)
+            hint = if (selectedTradeSide == TradeSide.BUY) {
+                "0 ${pair.quoteAsset}"
+            } else {
+                "0 ${pair.token.symbol}"
+            }
+            setHintTextColor(MUTED)
+            setTextColor(TEXT)
+            textSize = 18f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setPadding(dp(14), 0, dp(14), 0)
+            background = rounded(SURFACE_DARK, dp(8), BORDER, 1)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    val next = s?.toString().orEmpty()
+                    if (next == tradeAmountInput) return
+                    tradeAmountInput = next
+                    tradeQuote = null
+                    tradeQuoteError = null
+                    tradeStatusMessage = null
+                    tradeStatusIsError = false
+                    scheduleTradeQuoteLoad(pair)
+                }
+            })
+        }
+
+    private fun applyBuyPreset(pair: ForgePair, amount: String) {
+        hideKeyboard()
+        tradeAmountInput = amount
+        tradeQuote = null
+        tradeQuoteError = null
+        tradeStatusMessage = null
+        tradeStatusIsError = false
+        scheduleTradeQuoteLoad(pair, delayMs = 0L)
+        render()
+    }
+
+    private fun applySellPreset(pair: ForgePair, percentage: Int) {
+        hideKeyboard()
+        val balance = connectedTokenBalance(pair)
+        if (balance == null) {
+            tradeStatusMessage = "Connect wallet to use sell presets."
+            tradeStatusIsError = true
+            render()
+            return
+        }
+        val amount = balance.multiply(BigInteger.valueOf(percentage.toLong())).divide(BigInteger.valueOf(100))
+        tradeAmountInput = formatTokenAmount(amount, pair.token.decimals, maxFractionDigits = pair.token.decimals).replace(",", "")
+        tradeQuote = null
+        tradeQuoteError = null
+        tradeStatusMessage = null
+        tradeStatusIsError = false
+        scheduleTradeQuoteLoad(pair, delayMs = 0L)
+        render()
+    }
+
+    private fun ensureTradeQuote(pair: ForgePair) {
+        if (tradeAmountInput.trim().isBlank()) return
+        val key = currentTradeRequestKey(pair)
+        if (tradeQuoteRequestKey == key && (tradeQuoteLoading || tradeQuote != null || tradeQuoteError != null)) {
+            return
+        }
+        scheduleTradeQuoteLoad(pair, delayMs = 0L)
+    }
+
+    private fun scheduleTradeQuoteLoad(pair: ForgePair, delayMs: Long = 350L) {
+        tradeQuoteHandler.removeCallbacksAndMessages(null)
+        val key = currentTradeRequestKey(pair)
+        tradeQuoteRequestKey = key
+        if (tradeAmountInput.trim().isBlank()) {
+            tradeQuote = null
+            tradeQuoteLoading = false
+            tradeQuoteError = null
+            return
+        }
+
+        tradeQuoteLoading = true
+        tradeQuoteHandler.postDelayed({ loadTradeQuote(pair, key) }, delayMs)
+    }
+
+    private fun loadTradeQuote(pair: ForgePair, requestKey: String) {
+        val amountRaw = parseTradeAmountInput(pair)
+        if (amountRaw == null || amountRaw <= BigInteger.ZERO) {
+            tradeQuoteLoading = false
+            tradeQuote = null
+            tradeQuoteError = "Enter a valid ${tradeInputUnit(pair)} amount."
+            render()
+            return
+        }
+
+        executor.submit {
+            try {
+                val loadedQuote = if (selectedTradeSide == TradeSide.BUY) {
+                    val buy = repository.getBondingCurveBuyQuote(pair.token.contractHash, amountRaw)
+                    ForgeTradeQuote.Buy(requestKey, buy)
+                } else {
+                    val sell = repository.getBondingCurveSellQuote(pair.token.contractHash, amountRaw)
+                    ForgeTradeQuote.Sell(requestKey, sell)
+                }
+                runOnUiThread {
+                    if (tradeQuoteRequestKey != requestKey) return@runOnUiThread
+                    tradeQuote = loadedQuote
+                    tradeQuoteLoading = false
+                    tradeQuoteError = null
+                    render()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (tradeQuoteRequestKey != requestKey) return@runOnUiThread
+                    tradeQuote = null
+                    tradeQuoteLoading = false
+                    tradeQuoteError = error.message ?: error.javaClass.simpleName
+                    render()
+                }
+            }
+        }
+    }
+
+    private fun submitMarketTrade(pair: ForgePair) {
+        hideKeyboard()
+        val address = connectedWalletAddress
+        if (address == null) {
+            connectNeon()
+            return
+        }
+
+        val quote = tradeQuote?.takeIf { it.requestKey == currentTradeRequestKey(pair) }
+        if (quote == null) {
+            tradeStatusMessage = "Refresh the trade preview before signing."
+            tradeStatusIsError = true
+            scheduleTradeQuoteLoad(pair, delayMs = 0L)
+            render()
+            return
+        }
+
+        val validation = tradeValidationMessage(pair, quote)
+        if (validation != null) {
+            tradeStatusMessage = validation
+            tradeStatusIsError = true
+            render()
+            return
+        }
+
+        val fromHash = addressToHash160(address)
+        if (fromHash == null) {
+            tradeStatusMessage = "Connected wallet address is invalid."
+            tradeStatusIsError = true
+            render()
+            return
+        }
+
+        val requestPayload = buildTradeInvokeFunctionPayload(pair, quote, fromHash)
+        tradeSubmitting = true
+        tradeStatusMessage = "Open Neon Wallet to approve the ${selectedTradeSide.label.lowercase(Locale.US)}."
+        tradeStatusIsError = false
+        render()
+
+        AppKit.request(
+            Request(
+                method = "invokeFunction",
+                params = requestPayload.toString(),
+                chainId = BuildConfig.WALLETCONNECT_CHAIN_ID
+            ),
+            onSuccess = { result: SentRequestResult ->
+                runOnUiThread {
+                    val requestId = (result as? SentRequestResult.WalletConnect)?.requestId
+                    if (requestId != null) {
+                        pendingTradeRequests[requestId] = PendingTradeRequest(
+                            pairHash = pair.token.contractHash,
+                            pairLabel = pair.pairLabel,
+                            side = selectedTradeSide
+                        )
+                    }
+                    tradeStatusMessage = "Waiting for Neon Wallet approval."
+                    tradeStatusIsError = false
+                    render()
+                    openWalletForActiveSession()
+                }
+            },
+            onError = { error: Throwable ->
+                runOnUiThread {
+                    tradeSubmitting = false
+                    tradeStatusMessage = error.message ?: error.javaClass.simpleName
+                    tradeStatusIsError = true
+                    render()
+                }
+            }
+        )
+    }
+
+    private fun handleWalletRequestResponse(response: Modal.Model.SessionRequestResponse) {
+        if (response.method == "getNetworkVersion") {
+            handleNetworkVersionResponse(response)
+            return
+        }
+
+        if (response.method != "invokeFunction") return
+
+        when (val result = response.result) {
+            is Modal.Model.JsonRpcResponse.JsonRpcResult -> {
+                val pending = pendingTradeRequests.remove(result.id) ?: return
+                val txHash = extractTxHash(result.result)
+                tradeSubmitting = false
+                if (txHash == null) {
+                    tradeStatusMessage = "Wallet approved, but no transaction hash was returned."
+                    tradeStatusIsError = true
+                    render()
+                    return
+                }
+                tradeStatusMessage = "Submitted ${shortHash(txHash)}. Waiting for confirmation..."
+                tradeStatusIsError = false
+                render()
+                pollTradeConfirmation(txHash, pending)
+            }
+            is Modal.Model.JsonRpcResponse.JsonRpcError -> {
+                val pending = pendingTradeRequests.remove(result.id) ?: return
+                tradeSubmitting = false
+                tradeStatusMessage = "${pending.side.label} rejected: ${result.message}"
+                tradeStatusIsError = true
+                render()
+            }
+        }
+    }
+
+    private fun handleNetworkVersionResponse(response: Modal.Model.SessionRequestResponse) {
+        when (val result = response.result) {
+            is Modal.Model.JsonRpcResponse.JsonRpcResult -> {
+                pendingNetworkVersionRequestId = null
+                val magic = extractNetworkMagic(result.result)
+                walletNetworkMagic = magic
+                walletNetworkValidationError = magic != BuildConfig.EXPECTED_NETWORK_MAGIC
+                walletNetworkValidationMessage = if (walletNetworkValidationError) {
+                    "Wallet network mismatch. Expected ${BuildConfig.EXPECTED_NETWORK_MAGIC}, got ${magic ?: "unknown"}."
+                } else {
+                    "Wallet network verified."
+                }
+                updateStatus()
+                render()
+            }
+
+            is Modal.Model.JsonRpcResponse.JsonRpcError -> {
+                pendingNetworkVersionRequestId = null
+                walletNetworkMagic = null
+                walletNetworkValidationError = true
+                walletNetworkValidationMessage = "Wallet network check failed: ${result.message}"
+                updateStatus()
+                render()
+            }
+        }
+    }
+
+    private fun pollTradeConfirmation(txHash: String, pending: PendingTradeRequest) {
+        executor.submit {
+            try {
+                val confirmed = repository.waitForTransaction(txHash)
+                runOnUiThread {
+                    tradeStatusMessage = if (confirmed) {
+                        "${pending.side.label} confirmed for ${pending.pairLabel}."
+                    } else {
+                        "${pending.side.label} submitted as ${shortHash(txHash)}. Refreshing market data."
+                    }
+                    tradeStatusIsError = false
+                    tradeAmountInput = ""
+                    tradeQuote = null
+                    tradeQuoteError = null
+                    refreshVisibleMarketData()
+                    render()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    tradeStatusMessage = error.message ?: error.javaClass.simpleName
+                    tradeStatusIsError = true
+                    refreshVisibleMarketData()
+                    render()
+                }
+            }
+        }
+    }
+
+    private fun buildTradeInvokeFunctionPayload(pair: ForgePair, quote: ForgeTradeQuote, fromHash: String): JSONObject {
+        val isBuy = quote is ForgeTradeQuote.Buy
+        val assetHash = if (isBuy) {
+            ForgeChainRepository.quoteAssetContractHash(pair.quoteAsset)
+        } else {
+            pair.token.contractHash
+        }
+        val transferAmount = when (quote) {
+            is ForgeTradeQuote.Buy -> quote.data.grossQuoteIn + quote.requiredGasFee
+            is ForgeTradeQuote.Sell -> quote.data.grossTokenIn
+        }
+        val minimumOutput = calculateMinimumOutput(quote.expectedOutput)
+        val data = if (isBuy) {
+            arrayInvokeArg(JSONArray()
+                .put(hashInvokeArg(pair.token.contractHash))
+                .put(integerInvokeArg(minimumOutput)))
+        } else {
+            arrayInvokeArg(JSONArray()
+                .put(integerInvokeArg(minimumOutput))
+                .put(integerInvokeArg(transferAmount)))
+        }
+
+        return JSONObject()
+            .put("invocations", JSONArray().put(JSONObject()
+                .put("scriptHash", assetHash)
+                .put("operation", "transfer")
+                .put("args", JSONArray()
+                    .put(hashInvokeArg(fromHash))
+                    .put(hashInvokeArg(BuildConfig.BONDING_CURVE_ROUTER_HASH))
+                    .put(integerInvokeArg(transferAmount))
+                    .put(data))))
+            .put("signers", JSONArray().put(JSONObject()
+                .put("account", fromHash)
+                .put("scopes", "CalledByEntry")))
+    }
+
+    private fun tradeValidationMessage(pair: ForgePair, quote: ForgeTradeQuote?): String? {
+        val amountRaw = parseTradeAmountInput(pair)
+        if (tradeAmountInput.trim().isBlank()) return null
+        walletNetworkSigningBlock()?.let { return it }
+        if (amountRaw == null || amountRaw <= BigInteger.ZERO) {
+            return "Enter a valid ${tradeInputUnit(pair)} amount."
+        }
+        if (quote == null) return null
+
+        if (quote is ForgeTradeQuote.Buy) {
+            val balance = connectedQuoteBalance(pair)
+            val required = quote.data.grossQuoteIn + quote.requiredGasFee
+            if (balance != null && required > balance) {
+                return "Amount exceeds ${pair.quoteAsset} wallet balance."
+            }
+        }
+
+        if (quote is ForgeTradeQuote.Sell) {
+            val balance = connectedTokenBalance(pair)
+            if (balance != null && quote.data.grossTokenIn > balance) {
+                return "Amount exceeds ${pair.token.symbol} wallet balance."
+            }
+            if (!quote.data.liquidityOkay) {
+                return "Not enough quote liquidity remains in the curve for this sell."
+            }
+            val gasBalance = connectedGasBalance()
+            if (gasBalance != null && quote.requiredGasFee > gasBalance) {
+                return "More GAS is required to cover creator/platform fee pulls."
+            }
+        }
+
+        return null
+    }
+
+    private fun walletNetworkSigningBlock(): String? {
+        if (connectedWalletAddress == null) return null
+        if (walletNetworkMagic == BuildConfig.EXPECTED_NETWORK_MAGIC && !walletNetworkValidationError) return null
+        if (walletNetworkValidationError) {
+            return walletNetworkValidationMessage ?: "Wallet network check failed."
+        }
+        if (pendingNetworkVersionRequestId != null) {
+            return "Waiting for wallet network verification."
+        }
+
+        return walletNetworkValidationMessage ?: "Wallet network check pending."
+    }
+
+    private fun expectedTradeOutputLabel(pair: ForgePair, quote: ForgeTradeQuote?): String =
+        when (quote) {
+            is ForgeTradeQuote.Buy -> "${formatTokenAmount(quote.data.netTokenOut, pair.token.decimals)} ${pair.token.symbol}"
+            is ForgeTradeQuote.Sell -> formatTradeQuoteAmount(quote.data.netQuoteOut, pair.quoteAsset)
+            null -> "-"
+        }
+
+    private fun minimumTradeOutputLabel(pair: ForgePair, quote: ForgeTradeQuote?): String =
+        when (quote) {
+            is ForgeTradeQuote.Buy -> "${formatTokenAmount(calculateMinimumOutput(quote.data.netTokenOut), pair.token.decimals)} ${pair.token.symbol}"
+            is ForgeTradeQuote.Sell -> formatTradeQuoteAmount(calculateMinimumOutput(quote.data.netQuoteOut), pair.quoteAsset)
+            null -> "-"
+        }
+
+    private fun grossTradeQuoteLabel(pair: ForgePair, quote: ForgeTradeQuote?): String =
+        when (quote) {
+            is ForgeTradeQuote.Buy -> formatTradeQuoteAmount(quote.data.quoteConsumed, pair.quoteAsset)
+            is ForgeTradeQuote.Sell -> formatTradeQuoteAmount(quote.data.grossQuoteOut, pair.quoteAsset)
+            null -> "-"
+        }
+
+    private fun formatTradeQuoteAmount(amount: BigInteger, quoteAsset: String): String =
+        formatQuoteAmount(amount, quoteAsset, maxFractionDigits = if (quoteAsset.equals("GAS", ignoreCase = true)) 8 else 0)
+
+    private fun nextTradePriceLabel(pair: ForgePair, quote: ForgeTradeQuote?): String =
+        when (quote) {
+            is ForgeTradeQuote.Buy -> formatMarketPrice(quote.data.nextPrice, pair.quoteAsset, pair.token.decimals)
+            is ForgeTradeQuote.Sell -> formatMarketPrice(quote.data.nextPrice, pair.quoteAsset, pair.token.decimals)
+            null -> "-"
+        }
+
+    private fun priceImpactLabel(pair: ForgePair, quote: ForgeTradeQuote?): String {
+        val executionPrice = when (quote) {
+            is ForgeTradeQuote.Buy ->
+                calculateExecutionPrice(quote.data.quoteConsumed, quote.data.netTokenOut)
+            is ForgeTradeQuote.Sell ->
+                calculateExecutionPrice(quote.data.netQuoteOut, quote.data.grossTokenIn)
+            null -> null
+        } ?: return "-"
+        if (pair.currentPrice <= BigInteger.ZERO) return "-"
+        val delta = executionPrice.subtract(pair.currentPrice).abs()
+        val bps = delta.multiply(BigInteger.valueOf(10_000)).divide(pair.currentPrice).toInt()
+        return "${bps / 100}.${(bps % 100).toString().padStart(2, '0')}%"
+    }
+
+    private fun tradeCtaLabel(pair: ForgePair): String =
+        if (connectedWalletAddress == null) {
+            "Connect wallet to trade"
+        } else if (tradeSubmitting) {
+            "${selectedTradeSide.label}ing ${pair.token.symbol}..."
+        } else {
+            "${selectedTradeSide.label} ${pair.token.symbol}"
+        }
+
+    private fun parseTradeAmountInput(pair: ForgePair): BigInteger? =
+        parseDecimalAmount(
+            tradeAmountInput,
+            if (selectedTradeSide == TradeSide.BUY) quoteAssetDecimals(pair.quoteAsset) else pair.token.decimals
+        )
+
+    private fun quoteAssetDecimals(quoteAsset: String): Int =
+        if (quoteAsset.equals("GAS", ignoreCase = true)) 8 else 0
+
+    private fun parseDecimalAmount(value: String, decimals: Int): BigInteger? {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return null
+        if (!Regex("^\\d+(?:\\.\\d*)?$").matches(trimmed)) return null
+        val fraction = trimmed.substringAfter(".", "")
+        if (fraction.length > decimals) return null
+        return runCatching {
+            BigDecimal(trimmed).movePointRight(decimals).toBigIntegerExact()
+        }.getOrNull()
+    }
+
+    private fun tradeInputUnit(pair: ForgePair): String =
+        if (selectedTradeSide == TradeSide.BUY) pair.quoteAsset else pair.token.symbol
+
+    private fun calculateMinimumOutput(expectedOutput: BigInteger): BigInteger =
+        expectedOutput.multiply(BigInteger.valueOf(10_000L - DEFAULT_SLIPPAGE_BPS))
+            .divide(BigInteger.valueOf(10_000))
+
+    private fun calculateExecutionPrice(quoteAmount: BigInteger, tokenAmount: BigInteger): BigInteger? {
+        if (quoteAmount <= BigInteger.ZERO || tokenAmount <= BigInteger.ZERO) return null
+        return quoteAmount.multiply(MARKET_PRICE_SCALE).divide(tokenAmount)
+    }
+
+    private fun connectedQuoteBalance(pair: ForgePair): BigInteger? {
+        val hash = ForgeChainRepository.quoteAssetContractHash(pair.quoteAsset)
+        return dashboard?.walletBalances
+            ?.firstOrNull { it.contractHash.equals(hash, ignoreCase = true) }
+            ?.amount
+    }
+
+    private fun connectedTokenBalance(pair: ForgePair): BigInteger? =
+        dashboard?.tokens
             ?.firstOrNull { it.contractHash.equals(pair.token.contractHash, ignoreCase = true) }
-            ?: pair.token
+            ?.walletBalance
+
+    private fun connectedGasBalance(): BigInteger? {
+        val gasHash = ForgeChainRepository.quoteAssetContractHash("GAS")
+        return dashboard?.walletBalances
+            ?.firstOrNull { it.contractHash.equals(gasHash, ignoreCase = true) }
+            ?.amount
+    }
+
+    private fun currentTradeRequestKey(pair: ForgePair): String =
+        "${pair.token.contractHash.lowercase(Locale.US)}|${selectedTradeSide.name}|${tradeAmountInput.trim()}"
+
+    private fun resetTradeState() {
+        tradeQuoteHandler.removeCallbacksAndMessages(null)
+        selectedTradeSide = TradeSide.BUY
+        tradeAmountInput = ""
+        tradeQuote = null
+        tradeQuoteLoading = false
+        tradeQuoteError = null
+        tradeStatusMessage = null
+        tradeStatusIsError = false
+        tradeQuoteRequestKey = null
+    }
+
+    private fun hashInvokeArg(hash: String): JSONObject =
+        JSONObject()
+            .put("type", "Hash160")
+            .put("value", hash)
+
+    private fun integerInvokeArg(value: BigInteger): JSONObject =
+        JSONObject()
+            .put("type", "Integer")
+            .put("value", value.toString())
+
+    private fun arrayInvokeArg(value: JSONArray): JSONObject =
+        JSONObject()
+            .put("type", "Array")
+            .put("value", value)
+
+    private fun extractNetworkMagic(value: Any?): Int? =
+        when (value) {
+            is Number -> value.toInt()
+            is Map<*, *> -> extractNetworkMagicFromMap(value)
+            is JSONObject -> extractNetworkMagicFromJson(value)
+            is String -> {
+                value.toIntOrNull()
+                    ?: runCatching { extractNetworkMagicFromJson(JSONObject(value)) }.getOrNull()
+                    ?: Regex("""network[^\d]*(\d+)""")
+                        .find(value)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+            }
+            else -> Regex("""network[^\d]*(\d+)""")
+                .find(value?.toString().orEmpty())
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+        }
+
+    private fun extractNetworkMagicFromMap(value: Map<*, *>): Int? =
+        numberAsInt(value["network"])
+            ?: extractNetworkMagic(value["protocol"])
+
+    private fun extractNetworkMagicFromJson(value: JSONObject): Int? =
+        numberAsInt(value.opt("network"))
+            ?: value.optJSONObject("protocol")?.let { extractNetworkMagicFromJson(it) }
+
+    private fun numberAsInt(value: Any?): Int? =
+        when (value) {
+            is Number -> value.toInt()
+            is String -> value.toIntOrNull()
+            else -> null
+        }
+
+    private fun extractTxHash(result: Any?): String? {
+        if (result is String && Regex("^0x[0-9a-fA-F]{64}$").matches(result)) {
+            return result
+        }
+        if (result is Map<*, *>) {
+            listOf("txid", "txId", "hash").forEach { key ->
+                val value = result[key]?.toString()
+                if (value != null && Regex("^0x[0-9a-fA-F]{64}$").matches(value)) return value
+            }
+        }
+        return Regex("0x[0-9a-fA-F]{64}")
+            .find(result?.toString().orEmpty())
+            ?.value
+    }
+
+    private fun hideKeyboard() {
+        val currentFocusView = currentFocus ?: root
+        val inputMethodManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        inputMethodManager.hideSoftInputFromWindow(currentFocusView.windowToken, 0)
+        root.requestFocus()
+    }
+
+    private fun loadPriceDisplayMode(): PriceDisplayMode {
+        val stored = getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .getString(PREFERENCE_PRICE_DISPLAY_MODE, PriceDisplayMode.QUOTE.name)
+        return PriceDisplayMode.entries.firstOrNull { it.name == stored } ?: PriceDisplayMode.QUOTE
+    }
+
+    private fun savePriceDisplayMode(mode: PriceDisplayMode) {
+        getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(PREFERENCE_PRICE_DISPLAY_MODE, mode.name)
+            .apply()
+    }
+
+    private fun renderDetailInfo(pair: ForgePair) {
+        loadMarketActivity(pair)
+        val tokenHash = pair.token.contractHash.lowercase(Locale.US)
+        val activity = marketActivityByToken[tokenHash]
+        val isLoading = loadingMarketActivity.contains(tokenHash)
+        val error = marketActivityErrors[tokenHash]
 
         content.addView(card().apply {
-            addView(text("Contract", 18, TEXT, Typeface.BOLD))
-            addView(infoRow("Hash", shortHash(pair.token.contractHash), copyIconButton("Token contract hash", pair.token.contractHash)).withTopPadding(10))
-            addView(infoRow("Creator", pair.token.creatorHash?.let { shortHash(it) } ?: "-").withTopPadding(8))
-            addView(infoRow("Total supply", formatTokenAmount(token.supply, token.decimals)).withTopPadding(8))
-            addView(infoRow("Created", relativeAge(pair.createdAt)).withTopPadding(8))
-        })
+            addView(activityTabRow())
+            when {
+                error != null && activity == null -> {
+                    addView(emptyInlineState("On-chain replay unavailable", error, true).withTopPadding(12))
+                }
+                isLoading && activity == null -> {
+                    addView(emptyInlineState("Replaying on-chain activity", "Reading router Trade events and token Transfer events.").withTopPadding(12))
+                }
+                activity == null -> {
+                    addView(emptyInlineState("Activity not loaded", "Refresh this pair to load market activity.").withTopPadding(12))
+                }
+                selectedActivityTab == ActivityTab.TRADE_HISTORY -> renderTradeHistoryRows(this, pair, activity)
+                selectedActivityTab == ActivityTab.HOLDERS -> renderHolderRows(this, pair, activity)
+                selectedActivityTab == ActivityTab.TOP_TRADERS -> renderTopTraderRows(this, pair, activity)
+            }
 
-        content.addView(card().apply {
-            addView(text("Holders", 18, TEXT, Typeface.BOLD))
-            addView(infoRow("Connected wallet", token.walletBalance?.let { formatTokenAmount(it, token.decimals) } ?: "No balance").withTopPadding(10))
-            addView(infoRow("Top holders", "Indexer endpoint needed").withTopPadding(8))
-        })
-
-        content.addView(card().apply {
-            addView(text("Activity", 18, TEXT, Typeface.BOLD))
-            addView(infoRow("Trades indexed", pair.totalTrades.toString()).withTopPadding(10))
-            addView(infoRow("Latest transaction", "Waiting for activity indexer").withTopPadding(8))
-        })
-
-        content.addView(card().apply {
-            addView(text("Project links", 18, TEXT, Typeface.BOLD))
-            addView(infoRow("X profile", "Not set").withTopPadding(10))
-            addView(infoRow("Website", "Not set").withTopPadding(8))
+            if (activity != null) {
+                addView(text("Indexed through block ${activity.indexedThroughBlock}", 11, MUTED, Typeface.NORMAL).withTopPadding(12))
+            }
         })
     }
 
@@ -873,7 +1600,237 @@ class MainActivity : Activity() {
             ).withTopPadding(16))
             addView(text("Drawn from router reserve and graduation state.", 12, MUTED, Typeface.NORMAL).withTopPadding(14))
         })
+
+        content.addView(card().apply {
+            addView(text("Launch Disclosure", 11, MUTED, Typeface.BOLD))
+            addView(text("Public market launch data", 20, TEXT, Typeface.BOLD).withTopPadding(6))
+            addView(text("FEAT-074 keeps the original launch split visible for all traders.", 12, MUTED, Typeface.NORMAL).withTopPadding(6))
+            addView(infoRow("Launch profile", launchProfileLabel(pair.launchProfile)).withTopPadding(14))
+            addView(infoRow("Graduation target", formatQuoteAmount(pair.graduationThreshold, pair.quoteAsset)).withTopPadding(8))
+            addView(infoRow("Initial curve inventory", "${formatTokenAmount(pair.launchCurveInventory, pair.token.decimals)} ${pair.token.symbol}").withTopPadding(8))
+            addView(infoRow("Initial retained inventory", "${formatTokenAmount(pair.launchRetainedInventory, pair.token.decimals)} ${pair.token.symbol}").withTopPadding(8))
+            addView(infoRow("Total supply", "${formatTokenAmount(pair.totalSupply, pair.token.decimals)} ${pair.token.symbol}").withTopPadding(8))
+            addView(infoRow("Current curve inventory", "${formatTokenAmount(pair.currentCurveInventory, pair.token.decimals)} ${pair.token.symbol}").withTopPadding(8))
+            addView(infoRow("Current price", displayMarketPrice(pair.currentPrice, pair.quoteAsset, pair.token.decimals)).withTopPadding(8))
+        })
     }
+
+    private fun activityTabRow(): View =
+        HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(activityTabButton("Trade History", ActivityTab.TRADE_HISTORY))
+                addView(activityTabButton("Holders", ActivityTab.HOLDERS))
+                addView(activityTabButton("Top Traders", ActivityTab.TOP_TRADERS))
+            })
+        }
+
+    private fun activityTabButton(label: String, tab: ActivityTab): Button =
+        Button(this).apply {
+            text = label
+            isAllCaps = false
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            minWidth = 0
+            minimumWidth = 0
+            includeFontPadding = false
+            setPadding(dp(12), 0, dp(12), 0)
+            val active = selectedActivityTab == tab
+            setTextColor(if (active) ORANGE else MUTED)
+            background = rounded(
+                if (active) ORANGE_MUTED else SURFACE_DARK,
+                dp(18),
+                if (active) ORANGE_MUTED else SURFACE_DARK,
+                1
+            )
+            setOnClickListener {
+                selectedActivityTab = tab
+                selectedActivityRowId = null
+                render()
+            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)).apply {
+                rightMargin = dp(8)
+            }
+        }
+
+    private fun renderTradeHistoryRows(parent: LinearLayout, pair: ForgePair, activity: ForgeMarketActivity) {
+        if (activity.trades.isEmpty()) {
+            parent.addView(emptyInlineState("No trades yet", "Settled buys and sells appear here after the first router Trade event.").withTopPadding(12))
+            return
+        }
+
+        activity.trades.forEachIndexed { index, trade ->
+            parent.addView(activityListItem(tradeHistoryRow(pair, trade), index > 0), activityRowParams(if (index == 0) 12 else 0))
+        }
+    }
+
+    private fun renderHolderRows(parent: LinearLayout, pair: ForgePair, activity: ForgeMarketActivity) {
+        if (activity.holders.isEmpty()) {
+            parent.addView(emptyInlineState("No holder data yet", "Holder balances are rebuilt from token Transfer events.").withTopPadding(12))
+            return
+        }
+
+        activity.holders.forEachIndexed { index, holder ->
+            parent.addView(activityListItem(holderRow(pair, holder), index > 0), activityRowParams(if (index == 0) 12 else 0))
+        }
+    }
+
+    private fun renderTopTraderRows(parent: LinearLayout, pair: ForgePair, activity: ForgeMarketActivity) {
+        if (activity.topTraders.isEmpty()) {
+            parent.addView(emptyInlineState("No top traders yet", "Trader ranks appear after settled market activity.").withTopPadding(12))
+            return
+        }
+
+        activity.topTraders.forEachIndexed { index, trader ->
+            parent.addView(activityListItem(topTraderRow(pair, trader), index > 0), activityRowParams(if (index == 0) 12 else 0))
+        }
+    }
+
+    private fun tradeHistoryRow(pair: ForgePair, trade: ForgeTradeHistoryEntry): View {
+        val rowId = "trade:${trade.id}"
+        return activityRow(selectedActivityRowId == rowId).apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                selectedActivityRowId = rowId
+                render()
+            }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(sidePill(trade.side))
+                addView(text(formatActivityTime(trade.occurredAt), 12, MUTED, Typeface.NORMAL), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    leftMargin = dp(8)
+                })
+                addView(text(shortAddress(trade.trader), 12, TEXT, Typeface.BOLD))
+            })
+            addView(metricGrid(
+                "Price", displayMarketPrice(trade.price, pair.quoteAsset, pair.token.decimals),
+                "Quote", formatQuoteAmount(trade.quoteAmount, pair.quoteAsset),
+                "Tokens", "${formatTokenAmount(trade.tokenAmount, pair.token.decimals, 2)} ${pair.token.symbol}",
+                "Tx", shortHash(trade.txHash)
+            ).withTopPadding(9))
+        }
+    }
+
+    private fun holderRow(pair: ForgePair, holder: ForgeHolderEntry): View {
+        val rowId = "holder:${holder.address}"
+        return activityRow(selectedActivityRowId == rowId).apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                selectedActivityRowId = rowId
+                render()
+            }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(text("#${holder.rank}", 12, MUTED, Typeface.BOLD))
+                addView(text(shortAddress(holder.address), 14, TEXT, Typeface.BOLD), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    leftMargin = dp(12)
+                })
+                addView(text(formatShareBps(holder.shareBps), 12, MUTED, Typeface.BOLD))
+            })
+            addView(metricGrid(
+                "Balance", "${formatTokenAmount(holder.balance, pair.token.decimals, 2)} ${pair.token.symbol}",
+                "Share", formatShareBps(holder.shareBps),
+                "Address", shortAddress(holder.address),
+                "Rank", holder.rank.toString()
+            ).withTopPadding(9))
+        }
+    }
+
+    private fun topTraderRow(pair: ForgePair, trader: ForgeTopTraderEntry): View {
+        val rowId = "trader:${trader.address}"
+        return activityRow(selectedActivityRowId == rowId).apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener {
+                selectedActivityRowId = rowId
+                render()
+            }
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(text("#${trader.rank}", 12, MUTED, Typeface.BOLD))
+                addView(text(shortAddress(trader.address), 14, TEXT, Typeface.BOLD), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    leftMargin = dp(12)
+                })
+                addView(text("${trader.totalTrades} trades", 12, MUTED, Typeface.BOLD))
+            })
+            addView(metricGrid(
+                "Buy vol", formatQuoteAmount(trader.buyVolume, pair.quoteAsset),
+                "Sell vol", formatQuoteAmount(trader.sellVolume, pair.quoteAsset),
+                "Net", formatQuoteAmount(trader.netQuoteVolume, pair.quoteAsset),
+                "Address", shortAddress(trader.address)
+            ).withTopPadding(9))
+        }
+    }
+
+    private fun activityListItem(row: View, showSeparator: Boolean): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            if (showSeparator) {
+                addView(View(this@MainActivity).apply {
+                    setBackgroundColor(ACTIVITY_SEPARATOR)
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            }
+            addView(row)
+        }
+
+    private fun activityRow(selected: Boolean): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(12), dp(10), dp(12))
+            background = rounded(
+                if (selected) ACTIVITY_ROW_SELECTED else SURFACE,
+                dp(8),
+                if (selected) ORANGE else BORDER,
+                if (selected) 1 else 0
+            )
+        }
+
+    private fun activityRowParams(top: Int): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(top)
+        }
+
+    private fun sidePill(side: String): TextView {
+        val isBuy = side.equals("buy", ignoreCase = true)
+        return text(side.uppercase(Locale.US), 10, if (isBuy) ORANGE else MUTED, Typeface.BOLD).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            background = rounded(if (isBuy) ORANGE_MUTED else SURFACE_DARK, dp(12), if (isBuy) ORANGE_MUTED else SURFACE_DARK, 0)
+        }
+    }
+
+    private fun emptyInlineState(title: String, body: String, error: Boolean = false): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = rounded(SURFACE_DARK, dp(8), if (error) ERROR else BORDER, if (error) 1 else 0)
+            addView(text(title, 16, TEXT, Typeface.BOLD))
+            addView(text(body, 12, if (error) ERROR else MUTED, Typeface.NORMAL).withTopPadding(6))
+        }
+
+    private fun formatActivityTime(timestamp: Long): String =
+        SimpleDateFormat("MMM d, HH:mm", Locale.US).format(Date(timestamp))
+
+    private fun formatShareBps(shareBps: Int?): String {
+        if (shareBps == null) return "-"
+        val normalized = shareBps.coerceAtLeast(0)
+        return "${normalized / 100}.${(normalized % 100).toString().padStart(2, '0')}%"
+    }
+
+    private fun launchProfileLabel(profile: String?): String =
+        when (profile?.lowercase(Locale.US)) {
+            "starter" -> "Starter"
+            "standard" -> "Standard"
+            "growth" -> "Growth"
+            "flagship" -> "Flagship"
+            else -> "-"
+        }
 
     private fun renderTokens(data: ForgeDashboard) {
         sectionTitle("Tokens", "Factory-created NEP-17 assets and wallet holdings")
@@ -1171,6 +2128,66 @@ class MainActivity : Activity() {
             topMargin = dp(top)
         }
 
+    private fun syncWalletNetworkValidation(sessionKey: String?) {
+        if (connectedWalletAddress == null || sessionKey.isNullOrBlank()) {
+            clearWalletNetworkValidation()
+            return
+        }
+
+        if (networkVersionValidationSessionKey == sessionKey &&
+            (walletNetworkMagic != null ||
+                pendingNetworkVersionRequestId != null ||
+                walletNetworkValidationError ||
+                walletNetworkValidationMessage != null)
+        ) {
+            return
+        }
+
+        clearWalletNetworkValidation()
+        networkVersionValidationSessionKey = sessionKey
+        requestWalletNetworkVersion()
+    }
+
+    private fun requestWalletNetworkVersion() {
+        if (!ForgeWalletConnect.isReady || connectedWalletAddress == null || pendingNetworkVersionRequestId != null) {
+            return
+        }
+
+        walletNetworkValidationMessage = "Checking wallet network."
+        walletNetworkValidationError = false
+        AppKit.request(
+            Request(
+                method = "getNetworkVersion",
+                params = "[]",
+                chainId = BuildConfig.WALLETCONNECT_CHAIN_ID
+            ),
+            onSuccess = { result: SentRequestResult ->
+                runOnUiThread {
+                    pendingNetworkVersionRequestId = (result as? SentRequestResult.WalletConnect)?.requestId
+                    render()
+                }
+            },
+            onError = { error: Throwable ->
+                runOnUiThread {
+                    pendingNetworkVersionRequestId = null
+                    walletNetworkMagic = null
+                    walletNetworkValidationError = true
+                    walletNetworkValidationMessage = error.message ?: error.javaClass.simpleName
+                    updateStatus()
+                    render()
+                }
+            }
+        )
+    }
+
+    private fun clearWalletNetworkValidation() {
+        walletNetworkMagic = null
+        walletNetworkValidationMessage = null
+        walletNetworkValidationError = false
+        pendingNetworkVersionRequestId = null
+        networkVersionValidationSessionKey = null
+    }
+
     private fun connectNeon() {
         if (!ForgeWalletConnect.isReady) {
             Toast.makeText(this, "WalletConnect is still initializing.", Toast.LENGTH_SHORT).show()
@@ -1222,6 +2239,7 @@ class MainActivity : Activity() {
             ForgeWalletConnectDelegate.selectSession(null)
             connectedWalletAddress = null
             connectedChainId = null
+            clearWalletNetworkValidation()
             refreshSessionUi()
             loadDashboard()
             return
@@ -1250,6 +2268,7 @@ class MainActivity : Activity() {
         ForgeWalletConnectDelegate.selectSession(null)
         connectedWalletAddress = null
         connectedChainId = null
+        clearWalletNetworkValidation()
         connectButton.isEnabled = true
         refreshSessionUi()
         loadDashboard()
@@ -1284,6 +2303,11 @@ class MainActivity : Activity() {
         connectedWalletAddress = signAddress ?: account?.address ?: appKitSessionAddress
         connectedChainId = signChainId ?: account?.chain?.id ?: appKitSessionChainId
         connectButton.text = connectedWalletAddress?.let { compactAddress(it) } ?: "Connect"
+        syncWalletNetworkValidation(
+            listOfNotNull(signSession?.topic, connectedChainId, connectedWalletAddress)
+                .joinToString("|")
+                .ifBlank { null }
+        )
         updateStatus()
     }
 
@@ -1347,6 +2371,15 @@ class MainActivity : Activity() {
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(this, "Neon Wallet is not installed.", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun openWalletForActiveSession() {
+        val redirect = ForgeWalletConnect.activeSession()?.redirect
+        if (!redirect.isNullOrBlank() && openUri(redirect)) {
+            return
+        }
+
+        openNeonWallet()
     }
 
     private fun normalizeWalletConnectUri(uri: String): String =
@@ -1484,9 +2517,53 @@ class MainActivity : Activity() {
         CURVE
     }
 
+    private enum class ActivityTab {
+        TRADE_HISTORY,
+        HOLDERS,
+        TOP_TRADERS
+    }
+
     private enum class PriceDisplayMode {
         QUOTE,
         USD
+    }
+
+    private enum class TradeSide(val label: String) {
+        BUY("Buy"),
+        SELL("Sell")
+    }
+
+    private data class PendingTradeRequest(
+        val pairHash: String,
+        val pairLabel: String,
+        val side: TradeSide
+    )
+
+    private sealed class ForgeTradeQuote {
+        abstract val requestKey: String
+        abstract val expectedOutput: BigInteger
+        abstract val creatorFee: BigInteger
+        abstract val platformFee: BigInteger
+        val requiredGasFee: BigInteger
+            get() = creatorFee + platformFee
+
+        data class Buy(
+            override val requestKey: String,
+            val data: ForgeBuyQuote
+        ) : ForgeTradeQuote() {
+            override val expectedOutput: BigInteger = data.netTokenOut
+            override val creatorFee: BigInteger = data.creatorFee
+            override val platformFee: BigInteger = data.platformFee
+        }
+
+        data class Sell(
+            override val requestKey: String,
+            val data: ForgeSellQuote
+        ) : ForgeTradeQuote() {
+            override val expectedOutput: BigInteger = data.netQuoteOut
+            override val creatorFee: BigInteger = data.creatorFee
+            override val platformFee: BigInteger = data.platformFee
+        }
     }
 
     private companion object {
@@ -1494,6 +2571,8 @@ class MainActivity : Activity() {
         private val HEADER = Color.rgb(33, 33, 33)
         private val SURFACE = Color.rgb(35, 35, 35)
         private val SURFACE_DARK = Color.rgb(25, 25, 25)
+        private val ACTIVITY_ROW_SELECTED = Color.rgb(55, 39, 34)
+        private val ACTIVITY_SEPARATOR = Color.rgb(65, 47, 41)
         private val TEXT = Color.rgb(245, 245, 245)
         private val MUTED = Color.rgb(166, 177, 188)
         private val BORDER = Color.rgb(73, 50, 42)
@@ -1508,5 +2587,9 @@ class MainActivity : Activity() {
         private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
         private const val MARKET_REFRESH_INTERVAL_MS = 15_000L
         private const val QUOTE_USD_REFRESH_INTERVAL_MS = 60_000L
+        private const val DEFAULT_SLIPPAGE_BPS = 100L
+        private const val PREFERENCES_NAME = "forge_android_preferences"
+        private const val PREFERENCE_PRICE_DISPLAY_MODE = "price_display_mode"
+        private val MARKET_PRICE_SCALE = BigInteger("1000000000000000000")
     }
 }

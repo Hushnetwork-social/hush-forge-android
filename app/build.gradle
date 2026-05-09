@@ -3,15 +3,46 @@ plugins {
     id "org.jetbrains.kotlin.android"
 }
 
-def mobileWalletHarnessPairUrl = providers.environmentVariable("FORGE_MOBILE_WALLET_HARNESS_PAIR_URL")
-        .orElse(providers.gradleProperty("forgeMobileWalletHarnessPairUrl"))
-        .getOrElse("")
-def forgeActivityApiBaseUrl = providers.environmentVariable("FORGE_ACTIVITY_API_BASE_URL")
-        .orElse(providers.gradleProperty("forgeActivityApiBaseUrl"))
-        .getOrElse("")
-def forgeMarketReferenceApiBaseUrl = providers.environmentVariable("FORGE_MARKET_REFERENCE_API_BASE_URL")
-        .orElse(providers.gradleProperty("forgeMarketReferenceApiBaseUrl"))
-        .getOrElse("")
+def envOrProperty = { envName, propertyName, defaultValue = "" ->
+    providers.environmentVariable(envName)
+            .orElse(providers.gradleProperty(propertyName))
+            .getOrElse(defaultValue)
+}
+def buildConfigString = { value ->
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+}
+
+def defaultRpcUrl = envOrProperty(
+        "FORGE_DEFAULT_RPC_URL",
+        "forgeDefaultRpcUrl",
+        "https://seek-some-patent-avoid.trycloudflare.com/"
+)
+def reownProjectId = envOrProperty(
+        "FORGE_REOWN_PROJECT_ID",
+        "forgeReownProjectId",
+        "a9ff54e3d56a52230ed8767db4d4a810"
+)
+def reownRelayUrl = envOrProperty("FORGE_REOWN_RELAY_URL", "forgeReownRelayUrl")
+def walletConnectChainId = envOrProperty("FORGE_WALLETCONNECT_CHAIN_ID", "forgeWalletConnectChainId", "neo3:private")
+def factoryContractHash = envOrProperty(
+        "FORGE_FACTORY_CONTRACT_HASH",
+        "forgeFactoryContractHash",
+        "0x37adad29af3e9b07271d9fdcce544a89a41d12e6"
+)
+def bondingCurveRouterHash = envOrProperty(
+        "FORGE_BONDING_CURVE_ROUTER_HASH",
+        "forgeBondingCurveRouterHash",
+        "0x830f1cddb1fdb783205fdc31fd2ec2723aae1e5a"
+)
+def mobileWalletHarnessPairUrl = envOrProperty(
+        "FORGE_MOBILE_WALLET_HARNESS_PAIR_URL",
+        "forgeMobileWalletHarnessPairUrl"
+)
+def forgeActivityApiBaseUrl = envOrProperty("FORGE_ACTIVITY_API_BASE_URL", "forgeActivityApiBaseUrl")
+def forgeMarketReferenceApiBaseUrl = envOrProperty(
+        "FORGE_MARKET_REFERENCE_API_BASE_URL",
+        "forgeMarketReferenceApiBaseUrl"
+)
 
 android {
     namespace "social.hushnetwork.forge"
@@ -23,16 +54,19 @@ android {
         targetSdk 36
         versionCode 1
         versionName "0.1.0-poc"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField "String", "DEFAULT_RPC_URL", "\"https://seek-some-patent-avoid.trycloudflare.com/\""
-        buildConfigField "String", "REOWN_PROJECT_ID", "\"a9ff54e3d56a52230ed8767db4d4a810\""
-        buildConfigField "String", "WALLETCONNECT_CHAIN_ID", "\"neo3:private\""
+        buildConfigField "String", "DEFAULT_RPC_URL", buildConfigString(defaultRpcUrl)
+        buildConfigField "String", "REOWN_PROJECT_ID", buildConfigString(reownProjectId)
+        buildConfigField "String", "REOWN_RELAY_URL", buildConfigString(reownRelayUrl)
+        buildConfigField "String", "WALLETCONNECT_CHAIN_ID", buildConfigString(walletConnectChainId)
         buildConfigField "String", "NEON_PACKAGE", "\"io.cityofzion.neon\""
-        buildConfigField "String", "FACTORY_CONTRACT_HASH", "\"0x37adad29af3e9b07271d9fdcce544a89a41d12e6\""
-        buildConfigField "String", "BONDING_CURVE_ROUTER_HASH", "\"0x830f1cddb1fdb783205fdc31fd2ec2723aae1e5a\""
-        buildConfigField "String", "MOBILE_WALLET_HARNESS_PAIR_URL", "\"${mobileWalletHarnessPairUrl.replace("\"", "\\\"")}\""
-        buildConfigField "String", "FORGE_ACTIVITY_API_BASE_URL", "\"${forgeActivityApiBaseUrl.replace("\"", "\\\"")}\""
-        buildConfigField "String", "FORGE_MARKET_REFERENCE_API_BASE_URL", "\"${forgeMarketReferenceApiBaseUrl.replace("\"", "\\\"")}\""
+        buildConfigField "String", "APP_ICON_URL", "\"https://hushnetwork.social/forge-logo.png\""
+        buildConfigField "String", "FACTORY_CONTRACT_HASH", buildConfigString(factoryContractHash)
+        buildConfigField "String", "BONDING_CURVE_ROUTER_HASH", buildConfigString(bondingCurveRouterHash)
+        buildConfigField "String", "MOBILE_WALLET_HARNESS_PAIR_URL", buildConfigString(mobileWalletHarnessPairUrl)
+        buildConfigField "String", "FORGE_ACTIVITY_API_BASE_URL", buildConfigString(forgeActivityApiBaseUrl)
+        buildConfigField "String", "FORGE_MARKET_REFERENCE_API_BASE_URL", buildConfigString(forgeMarketReferenceApiBaseUrl)
         buildConfigField "int", "EXPECTED_NETWORK_MAGIC", "5195086"
     }
 
@@ -70,4 +104,8 @@ dependencies {
     implementation "androidx.activity:activity-ktx:1.12.0"
     implementation "androidx.core:core-ktx:1.17.0"
     implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.9.3"
+    androidTestImplementation "androidx.test.ext:junit:1.2.1"
+    androidTestImplementation "androidx.test:runner:1.6.2"
+    androidTestImplementation "androidx.test:rules:1.6.1"
+    androidTestImplementation "androidx.test.uiautomator:uiautomator:2.3.0"
 }

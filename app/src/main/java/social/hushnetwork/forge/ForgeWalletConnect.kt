@@ -103,6 +103,7 @@ object ForgeWalletConnectDelegate : AppKit.ModalDelegate, CoreClient.CoreDelegat
 
     var onEvent: ((String) -> Unit)? = null
     var onSessionChanged: (() -> Unit)? = null
+    var onSessionRequestResponse: ((Modal.Model.SessionRequestResponse) -> Unit)? = null
     var selectedSessionTopic: String? = null
         private set
 
@@ -191,6 +192,9 @@ object ForgeWalletConnectDelegate : AppKit.ModalDelegate, CoreClient.CoreDelegat
                 "error=${result.code} ${result.message}"
         }
         emit("${response.method} response on ${response.chainId ?: "unknown chain"}: $resultText")
+        mainHandler.post {
+            onSessionRequestResponse?.invoke(response)
+        }
     }
 
     override fun onSessionAuthenticateResponse(sessionAuthenticateResponse: Modal.Model.SessionAuthenticateResponse) {

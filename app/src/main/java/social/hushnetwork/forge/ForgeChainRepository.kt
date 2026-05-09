@@ -11,6 +11,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.text.NumberFormat
 import java.util.Locale
 import org.json.JSONArray
@@ -42,8 +43,26 @@ private data class MarketTradeEvent(
     val txIndex: Int,
     val notificationIndex: Int,
     val occurredAt: Long,
+    val txHash: String,
+    val side: String,
+    val traderHash: String,
+    val traderAddress: String,
+    val quoteAsset: String,
     val quoteAmount: BigInteger,
+    val tokenAmount: BigInteger,
     val price: BigInteger
+)
+
+private data class MarketReplay(
+    val indexedThroughBlock: Int,
+    val tradeEvents: List<MarketTradeEvent>,
+    val holderBalances: Map<String, BigInteger>
+)
+
+private data class MutableTraderStats(
+    var totalTrades: Int = 0,
+    var buyVolume: BigInteger = BigInteger.ZERO,
+    var sellVolume: BigInteger = BigInteger.ZERO
 )
 
 class ForgeChainRepository(
@@ -105,6 +124,90 @@ class ForgeChainRepository(
         } else {
             readMarketCandles(pair)
         }
+
+    fun loadMarketActivity(pair: ForgePair): ForgeMarketActivity =
+        readMarketActivity(pair)
+
+    fun getBondingCurveBuyQuote(tokenHash: String, quoteIn: BigInteger): ForgeBuyQuote {
+        val stack = invokeFunctionWithAliases(
+            routerHash,
+            listOf("getBuyQuote", "GetBuyQuote"),
+            JSONArray()
+                .put(hashParam(tokenHash))
+                .put(integerParam(quoteIn))
+        )
+        val tuple = stack.optJSONObject(0)?.optJSONArray("value")
+            ?: throw IllegalStateException("GetBuyQuote returned no tuple for $tokenHash")
+        if (tuple.length() < 10) throw IllegalStateException("GetBuyQuote returned ${tuple.length()} fields")
+
+        return ForgeBuyQuote(
+            tokenHash = tokenHash,
+            grossQuoteIn = stackBigInteger(tuple.getJSONObject(0)),
+            quoteConsumed = stackBigInteger(tuple.getJSONObject(1)),
+            quoteRefund = stackBigInteger(tuple.getJSONObject(2)),
+            grossTokenOut = stackBigInteger(tuple.getJSONObject(3)),
+            burnAmount = stackBigInteger(tuple.getJSONObject(4)),
+            netTokenOut = stackBigInteger(tuple.getJSONObject(5)),
+            platformFee = stackBigInteger(tuple.getJSONObject(6)),
+            creatorFee = stackBigInteger(tuple.getJSONObject(7)),
+            nextPrice = stackBigInteger(tuple.getJSONObject(8)),
+            capped = stackBoolean(tuple.getJSONObject(9))
+        )
+    }
+
+    fun getBondingCurveSellQuote(tokenHash: String, tokenIn: BigInteger): ForgeSellQuote {
+        val stack = invokeFunctionWithAliases(
+            routerHash,
+            listOf("getSellQuote", "GetSellQuote"),
+            JSONArray()
+                .put(hashParam(tokenHash))
+                .put(integerParam(tokenIn))
+        )
+        val tuple = stack.optJSONObject(0)?.optJSONArray("value")
+            ?: throw IllegalStateException("GetSellQuote returned no tuple for $tokenHash")
+        if (tuple.length() < 9) throw IllegalStateException("GetSellQuote returned ${tuple.length()} fields")
+
+        return ForgeSellQuote(
+            tokenHash = tokenHash,
+            grossTokenIn = stackBigInteger(tuple.getJSONObject(0)),
+            burnAmount = stackBigInteger(tuple.getJSONObject(1)),
+            netTokenIn = stackBigInteger(tuple.getJSONObject(2)),
+            grossQuoteOut = stackBigInteger(tuple.getJSONObject(3)),
+            netQuoteOut = stackBigInteger(tuple.getJSONObject(4)),
+            platformFee = stackBigInteger(tuple.getJSONObject(5)),
+            creatorFee = stackBigInteger(tuple.getJSONObject(6)),
+            nextPrice = stackBigInteger(tuple.getJSONObject(7)),
+            liquidityOkay = stackBoolean(tuple.getJSONObject(8))
+        )
+    }
+
+    fun waitForTransaction(txHash: String, timeoutMs: Long = 45_000L, intervalMs: Long = 1_500L): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val result = rpc("getapplicationlog", JSONArray().put(txHash)).getJSONObject("result")
+                val executions = result.optJSONArray("executions")
+                val execution = executions?.optJSONObject(0)
+                val state = execution?.optString("vmstate").orEmpty()
+                if (state.contains("FAULT", ignoreCase = true)) {
+                    val exception = execution?.optString("exception").orEmpty()
+                    throw IllegalStateException(exception.ifBlank { "Transaction executed with FAULT" })
+                }
+                if (state.contains("HALT", ignoreCase = true) || executions != null) {
+                    return true
+                }
+            } catch (error: Exception) {
+                val message = error.message.orEmpty()
+                if (!message.contains("unknown", ignoreCase = true) &&
+                    !message.contains("-100", ignoreCase = true)
+                ) {
+                    throw error
+                }
+            }
+            Thread.sleep(intervalMs)
+        }
+        return false
+    }
 
     private fun readNetworkMagic(): Int {
         val result = rpc("getversion", JSONArray()).getJSONObject("result")
@@ -288,7 +391,12 @@ class ForgeChainRepository(
                     totalTrades = curve.totalTrades,
                     marketCap = curve.currentPrice.multiply(curve.totalSupply).divide(PRICE_SCALE),
                     createdAt = token.createdAt ?: curve.createdAt,
-                    contractStatus = curve.contractStatus
+                    contractStatus = curve.contractStatus,
+                    currentCurveInventory = curve.currentCurveInventory,
+                    launchCurveInventory = curve.curveInventory,
+                    launchRetainedInventory = curve.retainedInventory,
+                    totalSupply = curve.totalSupply,
+                    launchProfile = curve.launchProfile
                 )
             }.getOrNull()
         }
@@ -320,32 +428,94 @@ class ForgeChainRepository(
             contractStatus = stackText(tuple.getJSONObject(0)),
             quoteAsset = stackText(tuple.getJSONObject(1)).uppercase(Locale.US).ifBlank { "GAS" },
             realQuote = stackBigInteger(tuple.getJSONObject(3)),
+            currentCurveInventory = stackBigInteger(tuple.getJSONObject(4)),
             graduationThreshold = stackBigInteger(tuple.getJSONObject(6)),
             graduationReady = stackBoolean(tuple.getJSONObject(7)),
             currentPrice = stackBigInteger(tuple.getJSONObject(8)),
             totalTrades = stackBigInteger(tuple.getJSONObject(9)),
             createdAt = stackBigInteger(tuple.getJSONObject(10)).toLong(),
-            totalSupply = stackBigInteger(tuple.getJSONObject(13))
+            curveInventory = stackBigInteger(tuple.getJSONObject(11)),
+            retainedInventory = stackBigInteger(tuple.getJSONObject(12)),
+            totalSupply = stackBigInteger(tuple.getJSONObject(13)),
+            launchProfile = tuple.optJSONObject(15)?.let { normalizeLaunchProfile(stackText(it)) }
         )
     }
 
     private fun readMarketCandles(pair: ForgePair): List<ForgeMarketCandle> {
-        if (routerHash.isBlank() || routerHash == "0x") return emptyList()
-        if (pair.totalTrades <= BigInteger.ZERO) return emptyList()
+        val replay = readMarketReplay(pair)
+        if (replay.tradeEvents.isEmpty()) return emptyList()
+
+        val candles = linkedMapOf<Long, MutableMarketCandle>()
+        replay.tradeEvents
+            .sortedWith(compareBy<MarketTradeEvent> { it.blockIndex }.thenBy { it.txIndex }.thenBy { it.notificationIndex })
+            .forEach { trade ->
+                applyTradeToCandle(candles, trade.occurredAt, trade.price, trade.quoteAmount)
+            }
+
+        return buildContinuousCandles(candles.values.toList(), System.currentTimeMillis())
+    }
+
+    private fun readMarketActivity(pair: ForgePair): ForgeMarketActivity {
+        val replay = readMarketReplay(pair)
+        val sortedTrades = replay.tradeEvents.sortedWith(
+            compareBy<MarketTradeEvent> { it.blockIndex }
+                .thenBy { it.txIndex }
+                .thenBy { it.notificationIndex }
+        )
+        val traderStats = mutableMapOf<String, MutableTraderStats>()
+        sortedTrades.forEach { trade ->
+            val stats = traderStats.getOrPut(trade.traderHash) { MutableTraderStats() }
+            stats.totalTrades += 1
+            if (trade.side == "buy") {
+                stats.buyVolume += trade.quoteAmount
+            } else {
+                stats.sellVolume += trade.quoteAmount
+            }
+        }
+
+        return ForgeMarketActivity(
+            tokenHash = pair.token.contractHash,
+            indexedThroughBlock = replay.indexedThroughBlock,
+            trades = sortedTrades
+                .asReversed()
+                .take(DEFAULT_ACTIVITY_LIMIT)
+                .map { trade ->
+                    ForgeTradeHistoryEntry(
+                        id = "${trade.txHash}:${trade.notificationIndex}",
+                        occurredAt = trade.occurredAt,
+                        side = trade.side,
+                        trader = trade.traderAddress,
+                        quoteAsset = trade.quoteAsset,
+                        quoteAmount = trade.quoteAmount,
+                        tokenAmount = trade.tokenAmount,
+                        price = trade.price,
+                        txHash = trade.txHash
+                    )
+                },
+            holders = buildHolderEntries(replay.holderBalances, pair),
+            topTraders = buildTopTraderEntries(traderStats)
+        )
+    }
+
+    private fun readMarketReplay(pair: ForgePair): MarketReplay {
+        if (routerHash.isBlank() || routerHash == "0x") {
+            return MarketReplay(-1, emptyList(), emptyMap())
+        }
 
         val blockCount = rpc("getblockcount", JSONArray()).getInt("result")
         val startBlock = findFirstBlockAtOrAfter(
             blockCount,
             pair.createdAt?.let { normalizeTimestampToMs(it) - FIFTEEN_MINUTES_SECONDS * 1000L } ?: 0L
         )
-        val targetTradeCount = pair.totalTrades.min(BigInteger.valueOf(MAX_MOBILE_TRADES.toLong())).toInt()
         val tradeEvents = mutableListOf<MarketTradeEvent>()
+        val holderBalances = mutableMapOf<String, BigInteger>()
         val normalizedTokenHash = normalizeHash(pair.token.contractHash)
         val normalizedRouterHash = normalizeHash(routerHash)
-        var endExclusive = blockCount
+        var indexedThroughBlock = startBlock - 1
+        var start = startBlock
 
-        while (endExclusive > startBlock && tradeEvents.size < targetTradeCount) {
-            val start = maxOf(startBlock, endExclusive - BLOCK_BATCH_SIZE)
+        while (start < blockCount) {
+            val endExclusive = minOf(blockCount, start + BLOCK_BATCH_SIZE)
             val blockCalls = (start until endExclusive).map { blockIndex ->
                 RpcBatchCall("getblock", JSONArray().put(blockIndex).put(1))
             }
@@ -374,27 +544,26 @@ class ForgeChainRepository(
                 })
                 logResponses.forEachIndexed { index, response ->
                     val log = response?.optJSONObject("result") ?: return@forEachIndexed
-                    collectTradeEvents(
+                    collectMarketReplayEvents(
                         log = log,
                         ref = chunk[index],
                         normalizedRouterHash = normalizedRouterHash,
                         normalizedTokenHash = normalizedTokenHash,
-                        tradeEvents = tradeEvents
+                        tradeEvents = tradeEvents,
+                        holderBalances = holderBalances
                     )
                 }
             }
 
-            endExclusive = start
+            indexedThroughBlock = endExclusive - 1
+            start = endExclusive
         }
 
-        val candles = linkedMapOf<Long, MutableMarketCandle>()
-        tradeEvents
-            .sortedWith(compareBy<MarketTradeEvent> { it.blockIndex }.thenBy { it.txIndex }.thenBy { it.notificationIndex })
-            .forEach { trade ->
-                applyTradeToCandle(candles, trade.occurredAt, trade.price, trade.quoteAmount)
-            }
-
-        return buildContinuousCandles(candles.values.toList(), System.currentTimeMillis())
+        return MarketReplay(
+            indexedThroughBlock = indexedThroughBlock.coerceAtLeast(0),
+            tradeEvents = tradeEvents.takeLast(MAX_MOBILE_TRADES),
+            holderBalances = holderBalances
+        )
     }
 
     private fun findFirstBlockAtOrAfter(blockCount: Int, timestampMs: Long): Int {
@@ -418,12 +587,13 @@ class ForgeChainRepository(
         return answer.coerceIn(0, blockCount)
     }
 
-    private fun collectTradeEvents(
+    private fun collectMarketReplayEvents(
         log: JSONObject,
         ref: TxRef,
         normalizedRouterHash: String,
         normalizedTokenHash: String,
-        tradeEvents: MutableList<MarketTradeEvent>
+        tradeEvents: MutableList<MarketTradeEvent>,
+        holderBalances: MutableMap<String, BigInteger>
     ) {
         val executions = log.optJSONArray("executions") ?: JSONArray()
         for (executionIndex in 0 until executions.length()) {
@@ -434,26 +604,41 @@ class ForgeChainRepository(
 
             for (notificationIndex in 0 until notifications.length()) {
                 val notification = notifications.optJSONObject(notificationIndex) ?: continue
-                if (!notification.optString("eventname").equals("Trade", ignoreCase = true)) {
-                    continue
-                }
-                if (!normalizeHash(notification.optString("contract")).equals(normalizedRouterHash, ignoreCase = true)) {
+                val contractHash = normalizeHash(notification.optString("contract"))
+                val eventName = notification.optString("eventname")
+
+                if (contractHash.equals(normalizedRouterHash, ignoreCase = true) &&
+                    eventName.equals("Trade", ignoreCase = true)
+                ) {
+                    val trade = parseTradeNotification(notification) ?: continue
+                    if (!trade.tokenHash.equals(normalizedTokenHash, ignoreCase = true)) {
+                        continue
+                    }
+
+                    tradeEvents += MarketTradeEvent(
+                        blockIndex = ref.blockIndex,
+                        txIndex = ref.txIndex,
+                        notificationIndex = notificationIndex,
+                        occurredAt = ref.occurredAt,
+                        txHash = ref.txHash,
+                        side = trade.side,
+                        traderHash = trade.traderHash,
+                        traderAddress = hash160ToAddress(trade.traderHash) ?: trade.traderHash,
+                        quoteAsset = trade.quoteAsset,
+                        quoteAmount = trade.quoteAmount,
+                        tokenAmount = trade.tokenAmount,
+                        price = trade.price
+                    )
                     continue
                 }
 
-                val trade = parseTradeNotification(notification) ?: continue
-                if (!trade.tokenHash.equals(normalizedTokenHash, ignoreCase = true)) {
-                    continue
+                if (contractHash.equals(normalizedTokenHash, ignoreCase = true) &&
+                    eventName.equals("Transfer", ignoreCase = true)
+                ) {
+                    val transfer = parseTransferNotification(notification) ?: continue
+                    applyTransferBalance(holderBalances, transfer.fromHash, transfer.amount.negate())
+                    applyTransferBalance(holderBalances, transfer.toHash, transfer.amount)
                 }
-
-                tradeEvents += MarketTradeEvent(
-                    blockIndex = ref.blockIndex,
-                    txIndex = ref.txIndex,
-                    notificationIndex = notificationIndex,
-                    occurredAt = ref.occurredAt,
-                    quoteAmount = trade.quoteAmount,
-                    price = trade.price
-                )
             }
         }
     }
@@ -498,8 +683,18 @@ class ForgeChainRepository(
 
     private data class ParsedMarketTrade(
         val tokenHash: String,
+        val traderHash: String,
+        val side: String,
+        val quoteAsset: String,
         val quoteAmount: BigInteger,
+        val tokenAmount: BigInteger,
         val price: BigInteger
+    )
+
+    private data class ParsedTransfer(
+        val fromHash: String?,
+        val toHash: String?,
+        val amount: BigInteger
     )
 
     private fun parseTradeNotification(notification: JSONObject): ParsedMarketTrade? {
@@ -507,12 +702,114 @@ class ForgeChainRepository(
         if (values.length() < 9) return null
 
         val tokenHash = stackHash160(values.optJSONObject(0)) ?: return null
+        val traderHash = stackHash160(values.optJSONObject(1)) ?: return null
+        val side = stackText(values.getJSONObject(2)).trim().lowercase(Locale.US)
+        val quoteAsset = stackText(values.getJSONObject(3)).trim().uppercase(Locale.US)
+        if (side != "buy" && side != "sell") return null
+        if (quoteAsset != "GAS" && quoteAsset != "NEO") return null
+
         return ParsedMarketTrade(
             tokenHash = normalizeHash(tokenHash),
+            traderHash = normalizeHash(traderHash),
+            side = side,
+            quoteAsset = quoteAsset,
             quoteAmount = stackBigInteger(values.getJSONObject(6)),
+            tokenAmount = stackBigInteger(values.getJSONObject(7)),
             price = stackBigInteger(values.getJSONObject(8))
         )
     }
+
+    private fun parseTransferNotification(notification: JSONObject): ParsedTransfer? {
+        val values = notification.optJSONObject("state")?.optJSONArray("value") ?: return null
+        if (values.length() < 3) return null
+
+        return ParsedTransfer(
+            fromHash = stackHash160(values.optJSONObject(0))?.let { normalizeHash(it) },
+            toHash = stackHash160(values.optJSONObject(1))?.let { normalizeHash(it) },
+            amount = stackBigInteger(values.getJSONObject(2))
+        )
+    }
+
+    private fun applyTransferBalance(
+        balances: MutableMap<String, BigInteger>,
+        holderHash: String?,
+        delta: BigInteger
+    ) {
+        val normalized = holderHash?.let { normalizeHash(it) } ?: return
+        if (normalized == ZERO_HASH || delta == BigInteger.ZERO) return
+
+        val next = (balances[normalized] ?: BigInteger.ZERO) + delta
+        if (next <= BigInteger.ZERO) {
+            balances.remove(normalized)
+        } else {
+            balances[normalized] = next
+        }
+    }
+
+    private fun buildHolderEntries(
+        balances: Map<String, BigInteger>,
+        pair: ForgePair
+    ): List<ForgeHolderEntry> {
+        val normalizedRouter = normalizeHash(routerHash)
+        val outstandingSupply = balances.entries.fold(BigInteger.ZERO) { sum, entry ->
+            val hash = normalizeHash(entry.key)
+            if (hash == normalizedRouter || hash == ZERO_HASH || entry.value <= BigInteger.ZERO) {
+                sum
+            } else {
+                sum + entry.value
+            }
+        }
+
+        return balances.entries
+            .filter { entry ->
+                val hash = normalizeHash(entry.key)
+                hash != normalizedRouter && hash != ZERO_HASH && entry.value > BigInteger.ZERO
+            }
+            .sortedWith { left, right ->
+                val balanceCompare = right.value.compareTo(left.value)
+                if (balanceCompare != 0) balanceCompare else left.key.compareTo(right.key)
+            }
+            .take(DEFAULT_ACTIVITY_LIMIT)
+            .mapIndexed { index, entry ->
+                val hash = normalizeHash(entry.key)
+                ForgeHolderEntry(
+                    rank = index + 1,
+                    address = hash160ToAddress(hash) ?: hash,
+                    balance = entry.value,
+                    shareBps = if (outstandingSupply > BigInteger.ZERO) {
+                        entry.value.multiply(BigInteger.valueOf(10_000)).divide(outstandingSupply).toInt()
+                    } else {
+                        null
+                    }
+                )
+            }
+    }
+
+    private fun buildTopTraderEntries(
+        traderStats: Map<String, MutableTraderStats>
+    ): List<ForgeTopTraderEntry> =
+        traderStats.entries
+            .sortedWith { left, right ->
+                val tradeCompare = right.value.totalTrades.compareTo(left.value.totalTrades)
+                if (tradeCompare != 0) return@sortedWith tradeCompare
+                val leftVolume = left.value.buyVolume + left.value.sellVolume
+                val rightVolume = right.value.buyVolume + right.value.sellVolume
+                val volumeCompare = rightVolume.compareTo(leftVolume)
+                if (volumeCompare != 0) volumeCompare else left.key.compareTo(right.key)
+            }
+            .take(DEFAULT_ACTIVITY_LIMIT)
+            .mapIndexed { index, entry ->
+                val hash = normalizeHash(entry.key)
+                val stats = entry.value
+                ForgeTopTraderEntry(
+                    rank = index + 1,
+                    address = hash160ToAddress(hash) ?: hash,
+                    totalTrades = stats.totalTrades,
+                    buyVolume = stats.buyVolume,
+                    sellVolume = stats.sellVolume,
+                    netQuoteVolume = stats.buyVolume - stats.sellVolume
+                )
+            }
 
     private fun applyTradeToCandle(
         candles: MutableMap<Long, MutableMarketCandle>,
@@ -692,6 +989,11 @@ class ForgeChainRepository(
             .put("type", "Hash160")
             .put("value", hash)
 
+    private fun integerParam(value: BigInteger): JSONObject =
+        JSONObject()
+            .put("type", "Integer")
+            .put("value", value.toString())
+
     private fun nativeToken(contractHash: String): ForgeToken? =
         when (contractHash.lowercase(Locale.US)) {
             NEO_HASH -> ForgeToken(
@@ -800,6 +1102,46 @@ class ForgeChainRepository(
             else -> null
         }
 
+    private fun normalizeLaunchProfile(profile: String): String? =
+        when (profile.trim().lowercase(Locale.US)) {
+            "starter" -> "starter"
+            "standard" -> "standard"
+            "growth" -> "growth"
+            "flagship" -> "flagship"
+            else -> null
+        }
+
+    private fun hash160ToAddress(hash: String): String? =
+        runCatching {
+            val normalized = hash.removePrefix("0x")
+            if (!Regex("^[0-9a-fA-F]{40}$").matches(normalized)) return null
+            val scriptHash = normalized.chunked(2)
+                .map { it.toInt(16).toByte() }
+                .toByteArray()
+                .reversedArray()
+            val payload = byteArrayOf(0x35.toByte()) + scriptHash
+            base58Encode(payload + checksum(payload))
+        }.getOrNull()
+
+    private fun base58Encode(bytes: ByteArray): String {
+        var number = BigInteger(1, bytes)
+        val output = StringBuilder()
+        while (number > BigInteger.ZERO) {
+            val division = number.divideAndRemainder(BigInteger.valueOf(58))
+            number = division[0]
+            output.append(BASE58_ALPHABET[division[1].toInt()])
+        }
+        repeat(bytes.takeWhile { it == 0.toByte() }.count()) {
+            output.append('1')
+        }
+        return output.reverse().toString()
+    }
+
+    private fun checksum(payload: ByteArray): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        return digest.digest(digest.digest(payload)).copyOfRange(0, 4)
+    }
+
     private fun parseBigInteger(value: String): BigInteger =
         runCatching { BigInteger(value.ifBlank { "0" }) }.getOrDefault(BigInteger.ZERO)
 
@@ -809,9 +1151,15 @@ class ForgeChainRepository(
         private const val FIFTEEN_MINUTES_SECONDS = 15L * 60L
         private const val MAX_MOBILE_CANDLES = 96
         private const val MAX_MOBILE_TRADES = 250
+        private const val DEFAULT_ACTIVITY_LIMIT = 25
         private const val BLOCK_BATCH_SIZE = 250
         private const val LOG_BATCH_SIZE = 100
+        private const val ZERO_HASH = "0x0000000000000000000000000000000000000000"
+        private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
         private val PRICE_SCALE = BigInteger("1000000000000000000")
+
+        fun quoteAssetContractHash(quoteAsset: String): String =
+            if (quoteAsset.equals("NEO", ignoreCase = true)) NEO_HASH else GAS_HASH
     }
 }
 
@@ -861,6 +1209,11 @@ data class ForgePair(
     val marketCap: BigInteger,
     val createdAt: Long?,
     val contractStatus: String,
+    val currentCurveInventory: BigInteger,
+    val launchCurveInventory: BigInteger,
+    val launchRetainedInventory: BigInteger,
+    val totalSupply: BigInteger,
+    val launchProfile: String?,
     val candles: List<ForgeMarketCandle> = emptyList()
 )
 
@@ -873,17 +1226,84 @@ data class ForgeMarketCandle(
     val volume: BigInteger
 )
 
+data class ForgeMarketActivity(
+    val tokenHash: String,
+    val indexedThroughBlock: Int,
+    val trades: List<ForgeTradeHistoryEntry>,
+    val holders: List<ForgeHolderEntry>,
+    val topTraders: List<ForgeTopTraderEntry>
+)
+
+data class ForgeTradeHistoryEntry(
+    val id: String,
+    val occurredAt: Long,
+    val side: String,
+    val trader: String,
+    val quoteAsset: String,
+    val quoteAmount: BigInteger,
+    val tokenAmount: BigInteger,
+    val price: BigInteger,
+    val txHash: String
+)
+
+data class ForgeHolderEntry(
+    val rank: Int,
+    val address: String,
+    val balance: BigInteger,
+    val shareBps: Int?
+)
+
+data class ForgeTopTraderEntry(
+    val rank: Int,
+    val address: String,
+    val totalTrades: Int,
+    val buyVolume: BigInteger,
+    val sellVolume: BigInteger,
+    val netQuoteVolume: BigInteger
+)
+
 data class ForgeCurve(
     val tokenHash: String,
     val contractStatus: String,
     val quoteAsset: String,
     val realQuote: BigInteger,
+    val currentCurveInventory: BigInteger,
     val graduationThreshold: BigInteger,
     val graduationReady: Boolean,
     val currentPrice: BigInteger,
     val totalTrades: BigInteger,
     val createdAt: Long,
-    val totalSupply: BigInteger
+    val curveInventory: BigInteger,
+    val retainedInventory: BigInteger,
+    val totalSupply: BigInteger,
+    val launchProfile: String?
+)
+
+data class ForgeBuyQuote(
+    val tokenHash: String,
+    val grossQuoteIn: BigInteger,
+    val quoteConsumed: BigInteger,
+    val quoteRefund: BigInteger,
+    val grossTokenOut: BigInteger,
+    val burnAmount: BigInteger,
+    val netTokenOut: BigInteger,
+    val platformFee: BigInteger,
+    val creatorFee: BigInteger,
+    val nextPrice: BigInteger,
+    val capped: Boolean
+)
+
+data class ForgeSellQuote(
+    val tokenHash: String,
+    val grossTokenIn: BigInteger,
+    val burnAmount: BigInteger,
+    val netTokenIn: BigInteger,
+    val grossQuoteOut: BigInteger,
+    val netQuoteOut: BigInteger,
+    val platformFee: BigInteger,
+    val creatorFee: BigInteger,
+    val nextPrice: BigInteger,
+    val liquidityOkay: Boolean
 )
 
 data class ForgeFactoryConfig(
