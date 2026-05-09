@@ -7,7 +7,10 @@ import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import android.util.Log
 import org.json.JSONObject
+
+private const val TAG = "ForgeMobileHarness"
 
 object MobileWalletHarness {
     val enabled: Boolean
@@ -21,10 +24,15 @@ object MobileWalletHarness {
         }
 
         Thread {
-            runCatching {
+            val result = runCatching {
+                Log.i(TAG, "Posting WalletConnect URI to local harness: $pairUrl")
                 postPairUri(pairUrl, uri)
                 "Local mobile harness wallet paired."
-            }.also(onResult)
+            }
+            result
+                .onSuccess { Log.i(TAG, "Local harness wallet pair request succeeded.") }
+                .onFailure { Log.e(TAG, "Local harness wallet pair request failed.", it) }
+            onResult(result)
         }.start()
     }
 
@@ -44,12 +52,17 @@ object MobileWalletHarness {
             setRequestProperty("Content-Length", body.size.toString())
         }
 
-        connection.outputStream.use { output: OutputStream -> output.write(body) }
+        try {
+            connection.outputStream.use { output: OutputStream -> output.write(body) }
 
-        val status = connection.responseCode
-        val response = readAll(if (status in 200..299) connection.inputStream else connection.errorStream)
-        if (status !in 200..299) {
-            throw IllegalStateException("Harness pair failed: HTTP $status $response")
+            val status = connection.responseCode
+            val response = readAll(if (status in 200..299) connection.inputStream else connection.errorStream)
+            Log.i(TAG, "Harness pair response: HTTP $status $response")
+            if (status !in 200..299) {
+                throw IllegalStateException("Harness pair failed: HTTP $status $response")
+            }
+        } finally {
+            connection.disconnect()
         }
     }
 

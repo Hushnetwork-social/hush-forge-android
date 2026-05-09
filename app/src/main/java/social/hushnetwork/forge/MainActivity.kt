@@ -15,6 +15,7 @@ import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -2190,12 +2191,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun connectNeon() {
+        Log.i(TAG, "connectNeon ready=${ForgeWalletConnect.isReady} harness=${MobileWalletHarness.enabled}")
         if (!ForgeWalletConnect.isReady) {
             Toast.makeText(this, "WalletConnect is still initializing.", Toast.LENGTH_SHORT).show()
             return
         }
 
         ForgeWalletConnect.activeSession()?.let { session ->
+            Log.i(TAG, "Reusing active WalletConnect session topic=${session.topic}")
             ForgeWalletConnectDelegate.selectSession(session.topic)
             refreshSessionUi()
             loadDashboard()
@@ -2204,14 +2207,17 @@ class MainActivity : ComponentActivity() {
 
         connectButton.isEnabled = false
         val pairing = CoreClient.Pairing.create { error ->
+            Log.e(TAG, "WalletConnect pairing creation failed.", error.throwable)
             runOnUiThread {
                 connectButton.isEnabled = true
                 Toast.makeText(this, "Pairing failed: ${error.throwable.message}", Toast.LENGTH_LONG).show()
             }
         } ?: run {
+            Log.e(TAG, "WalletConnect pairing creation returned null.")
             connectButton.isEnabled = true
             return
         }
+        Log.i(TAG, "WalletConnect pairing created. Calling AppKit.connect.")
 
         AppKit.connect(
             Modal.Params.ConnectParams(
@@ -2220,12 +2226,14 @@ class MainActivity : ComponentActivity() {
                 pairing = pairing
             ),
             onSuccess = { uri ->
+                Log.i(TAG, "AppKit.connect produced WalletConnect URI: ${redactWalletConnectUri(uri)}")
                 runOnUiThread {
                     connectButton.isEnabled = true
                     openWalletConnectUri(uri)
                 }
             },
             onError = { error ->
+                Log.e(TAG, "AppKit.connect failed.", error.throwable)
                 runOnUiThread {
                     connectButton.isEnabled = true
                     Toast.makeText(this, "Connect failed: ${error.throwable.message}", Toast.LENGTH_LONG).show()
@@ -2325,6 +2333,7 @@ class MainActivity : ComponentActivity() {
     private fun openWalletConnectUri(uri: String) {
         copyToClipboard("WalletConnect URI", uri)
         if (MobileWalletHarness.enabled) {
+            Log.i(TAG, "Pairing WalletConnect URI through local harness.")
             Toast.makeText(this, "Pairing with local mobile harness wallet...", Toast.LENGTH_SHORT).show()
             MobileWalletHarness.pair(uri) { result ->
                 runOnUiThread {
@@ -2340,6 +2349,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        Log.i(TAG, "Opening WalletConnect URI with Neon Mobile.")
         val opened = openUriInNeon(uri) || openUriInNeon(normalizeWalletConnectUri(uri)) || openUri(uri)
         if (!opened) {
             openNeonWallet()
@@ -2569,6 +2579,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        private const val TAG = "ForgeMainActivity"
         private val FORGE_BG = Color.rgb(18, 18, 18)
         private val HEADER = Color.rgb(33, 33, 33)
         private val SURFACE = Color.rgb(35, 35, 35)
@@ -2593,5 +2604,10 @@ class MainActivity : ComponentActivity() {
         private const val PREFERENCES_NAME = "forge_android_preferences"
         private const val PREFERENCE_PRICE_DISPLAY_MODE = "price_display_mode"
         private val MARKET_PRICE_SCALE = BigInteger("1000000000000000000")
+
+        private fun redactWalletConnectUri(uri: String): String {
+            val base = uri.substringBefore("?").take(32)
+            return "$base...(${uri.length} chars)"
+        }
     }
 }
