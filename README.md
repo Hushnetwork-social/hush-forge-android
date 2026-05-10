@@ -39,6 +39,20 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 .\gradlew.bat :app:assembleDebug
 ```
 
+The app no longer ships with a baked-in private RPC tunnel or Reown project id.
+Set environment-specific values before building a runnable app:
+
+```powershell
+$env:FORGE_DEFAULT_RPC_URL='https://your-private-rpc.example/'
+$env:FORGE_REOWN_PROJECT_ID='your-reown-project-id'
+$env:FORGE_EXPECTED_NETWORK_MAGIC='5195086'
+.\gradlew.bat :app:assembleDebug
+```
+
+If `FORGE_DEFAULT_RPC_URL` is missing, the app shows a configuration error
+instead of trying to read chain data. If `FORGE_REOWN_PROJECT_ID` is missing,
+read-only RPC screens can load but Neon Mobile WalletConnect is disabled.
+
 Install and launch on the active emulator:
 
 ```powershell

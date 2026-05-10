@@ -25,11 +25,14 @@ The shared FORGE wallet harness implements this endpoint in the public
 ## Emulator URL
 
 When the harness runs on the CI/host machine and the Android app runs in the
-emulator, the Android app must use the emulator host alias:
+emulator, local manual runs can use the emulator host alias:
 
 ```text
 http://10.0.2.2:32103/pair
 ```
+
+GitHub Actions uses `adb reverse` for the RPC, relay, and pair endpoints, so the
+CI build uses runner-local `127.0.0.1` URLs from inside the emulator.
 
 ## Build With Harness Pairing
 
@@ -54,9 +57,10 @@ E2E matrix. Run broad E2E locally.
    `hush-forge-wallet-harness`.
 3. Enable KVM on the GitHub-hosted Ubuntu runner before starting the emulator.
 4. Build the Android APK with:
-   - `FORGE_DEFAULT_RPC_URL=http://10.0.2.2:10332`
-   - `FORGE_REOWN_RELAY_URL=ws://10.0.2.2:32102?projectId=forge-local-project`
-   - `FORGE_MOBILE_WALLET_HARNESS_PAIR_URL=http://10.0.2.2:32103/pair`
+   - `FORGE_DEFAULT_RPC_URL=http://127.0.0.1:10332`
+   - `FORGE_REOWN_PROJECT_ID=forge-local-project`
+   - `FORGE_REOWN_RELAY_URL=ws://127.0.0.1:32102?projectId=forge-local-project`
+   - `FORGE_MOBILE_WALLET_HARNESS_PAIR_URL=http://127.0.0.1:32103/pair`
 5. Install and launch the APK on the emulator.
 6. Tap `Connect`.
 7. The Android app sends the WalletConnect URI to the harness.

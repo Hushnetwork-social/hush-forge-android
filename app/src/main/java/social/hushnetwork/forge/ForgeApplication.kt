@@ -43,6 +43,12 @@ class ForgeApplication : Application() {
     }
 
     private fun initializeReownCore(metadata: Core.Model.AppMetaData) {
+        if (BuildConfig.REOWN_PROJECT_ID.isBlank()) {
+            Log.w(TAG, "Reown Core not initialized because FORGE_REOWN_PROJECT_ID is not configured.")
+            ForgeWalletConnectDelegate.emit("WalletConnect disabled: configure FORGE_REOWN_PROJECT_ID.")
+            return
+        }
+
         val onError = { error: Core.Model.Error ->
             Log.e(TAG, "Core initialization failed", error.throwable)
             ForgeWalletConnectDelegate.emit("Reown Core error: ${error.throwable.message ?: error.throwable.javaClass.simpleName}")

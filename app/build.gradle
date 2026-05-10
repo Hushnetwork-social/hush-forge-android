@@ -14,16 +14,18 @@ def buildConfigString = { value ->
 
 def defaultRpcUrl = envOrProperty(
         "FORGE_DEFAULT_RPC_URL",
-        "forgeDefaultRpcUrl",
-        "https://seek-some-patent-avoid.trycloudflare.com/"
+        "forgeDefaultRpcUrl"
 )
 def reownProjectId = envOrProperty(
         "FORGE_REOWN_PROJECT_ID",
-        "forgeReownProjectId",
-        "a9ff54e3d56a52230ed8767db4d4a810"
+        "forgeReownProjectId"
 )
 def reownRelayUrl = envOrProperty("FORGE_REOWN_RELAY_URL", "forgeReownRelayUrl")
 def walletConnectChainId = envOrProperty("FORGE_WALLETCONNECT_CHAIN_ID", "forgeWalletConnectChainId", "neo3:private")
+def expectedNetworkMagic = envOrProperty("FORGE_EXPECTED_NETWORK_MAGIC", "forgeExpectedNetworkMagic", "5195086")
+if (!(expectedNetworkMagic ==~ /\d+/)) {
+    throw new GradleException("FORGE_EXPECTED_NETWORK_MAGIC/forgeExpectedNetworkMagic must be an integer.")
+}
 def factoryContractHash = envOrProperty(
         "FORGE_FACTORY_CONTRACT_HASH",
         "forgeFactoryContractHash",
@@ -43,6 +45,11 @@ def forgeMarketReferenceApiBaseUrl = envOrProperty(
         "FORGE_MARKET_REFERENCE_API_BASE_URL",
         "forgeMarketReferenceApiBaseUrl"
 )
+def appIconUrl = envOrProperty(
+        "FORGE_APP_ICON_URL",
+        "forgeAppIconUrl",
+        "https://hushnetwork.social/forge-logo.png"
+)
 
 android {
     namespace "social.hushnetwork.forge"
@@ -61,13 +68,13 @@ android {
         buildConfigField "String", "REOWN_RELAY_URL", buildConfigString(reownRelayUrl)
         buildConfigField "String", "WALLETCONNECT_CHAIN_ID", buildConfigString(walletConnectChainId)
         buildConfigField "String", "NEON_PACKAGE", "\"io.cityofzion.neon\""
-        buildConfigField "String", "APP_ICON_URL", "\"https://hushnetwork.social/forge-logo.png\""
+        buildConfigField "String", "APP_ICON_URL", buildConfigString(appIconUrl)
         buildConfigField "String", "FACTORY_CONTRACT_HASH", buildConfigString(factoryContractHash)
         buildConfigField "String", "BONDING_CURVE_ROUTER_HASH", buildConfigString(bondingCurveRouterHash)
         buildConfigField "String", "MOBILE_WALLET_HARNESS_PAIR_URL", buildConfigString(mobileWalletHarnessPairUrl)
         buildConfigField "String", "FORGE_ACTIVITY_API_BASE_URL", buildConfigString(forgeActivityApiBaseUrl)
         buildConfigField "String", "FORGE_MARKET_REFERENCE_API_BASE_URL", buildConfigString(forgeMarketReferenceApiBaseUrl)
-        buildConfigField "int", "EXPECTED_NETWORK_MAGIC", "5195086"
+        buildConfigField "int", "EXPECTED_NETWORK_MAGIC", expectedNetworkMagic
     }
 
     compileOptions {

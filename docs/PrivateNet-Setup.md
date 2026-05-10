@@ -4,7 +4,8 @@
 
 - Magic: `5195086`
 - Host RPC: `http://127.0.0.1:10332`
-- Android app default RPC: configured in `app/build.gradle` as `DEFAULT_RPC_URL`
+- Android app RPC: supplied at build time with `FORGE_DEFAULT_RPC_URL` or
+  Gradle property `forgeDefaultRpcUrl`
 
 For the released Neon Mobile APK, use a trusted HTTPS RPC URL. The raw emulator
 HTTP URLs can be reachable from Android, but Neon Mobile targets a modern Android
@@ -19,8 +20,18 @@ docker run -d --name forge-neo-rpc-tunnel cloudflare/cloudflared:latest tunnel -
 docker logs forge-neo-rpc-tunnel
 ```
 
-Use the generated `https://*.trycloudflare.com/` URL in Neon Mobile and in
-`DEFAULT_RPC_URL` if the tunnel URL changes.
+Use the generated `https://*.trycloudflare.com/` URL in Neon Mobile and rebuild
+the Android app with it:
+
+```powershell
+$env:FORGE_DEFAULT_RPC_URL='https://your-current-tunnel.trycloudflare.com/'
+$env:FORGE_REOWN_PROJECT_ID='your-reown-project-id'
+$env:FORGE_EXPECTED_NETWORK_MAGIC='5195086'
+.\gradlew.bat :app:assembleDebug
+```
+
+Tunnel URLs are temporary. If the app reports a stale Cloudflare tunnel, restart
+the tunnel and rebuild with the new URL.
 
 Stop the tunnel after testing:
 

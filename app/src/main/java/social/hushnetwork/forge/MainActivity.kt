@@ -307,6 +307,12 @@ class MainActivity : ComponentActivity() {
         onLoaded: ((ForgeDashboard) -> Unit)? = null
     ) {
         if (loading) return
+        if (!isPrivateRpcConfigured()) {
+            dashboard = null
+            renderConfigurationError()
+            return
+        }
+
         loading = true
         if (showLoading || dashboard == null) {
             renderLoading()
@@ -328,10 +334,60 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     loading = false
                     dashboard = null
-                    renderError(error.message ?: error.javaClass.simpleName)
+                    renderError(formatRpcLoadError(error))
                 }
             }
         }
+    }
+
+    private fun isPrivateRpcConfigured(): Boolean =
+        BuildConfig.DEFAULT_RPC_URL.trim().isNotEmpty()
+
+    private fun isWalletConnectConfigured(): Boolean =
+        BuildConfig.REOWN_PROJECT_ID.trim().isNotEmpty()
+
+    private fun renderConfigurationError() {
+        content.removeAllViews()
+        content.addView(card(stroke = ERROR).apply {
+            addView(text("FORGE is not configured", 19, TEXT, Typeface.BOLD))
+            addView(text(
+                "Build the app with FORGE_DEFAULT_RPC_URL pointing at the private Neo3 RPC before loading chain data.",
+                13,
+                ERROR,
+                Typeface.NORMAL
+            ).withTopPadding(8))
+        })
+    }
+
+    private fun renderConfigurationWarnings() {
+        if (isWalletConnectConfigured()) return
+
+        content.addView(card(stroke = GOLD).apply {
+            addView(text("WalletConnect disabled", 17, TEXT, Typeface.BOLD))
+            addView(text(
+                "Build the app with FORGE_REOWN_PROJECT_ID to connect Neon Mobile. Read-only RPC screens can still load.",
+                13,
+                MUTED,
+                Typeface.NORMAL
+            ).withTopPadding(6))
+        })
+    }
+
+    private fun formatRpcLoadError(error: Exception): String {
+        val message = error.message ?: error.javaClass.simpleName
+        val rpcUrl = BuildConfig.DEFAULT_RPC_URL
+        if (
+            rpcUrl.contains("trycloudflare.com", ignoreCase = true) &&
+            (message.contains("Unable to resolve", ignoreCase = true) ||
+                message.contains("timed out", ignoreCase = true) ||
+                message.contains("HTTP 404", ignoreCase = true) ||
+                message.contains("HTTP 502", ignoreCase = true) ||
+                message.contains("HTTP 503", ignoreCase = true))
+        ) {
+            return "$message\n\nThe configured Cloudflare tunnel may be stale. Start a new HTTPS tunnel and rebuild with FORGE_DEFAULT_RPC_URL."
+        }
+
+        return message
     }
 
     private fun loadMarketCandles(pair: ForgePair, force: Boolean = false) {
@@ -509,9 +565,15 @@ class MainActivity : ComponentActivity() {
 
         val data = dashboard
         if (data == null) {
-            renderLoading()
+            if (isPrivateRpcConfigured()) {
+                renderLoading()
+            } else {
+                renderConfigurationError()
+            }
             return
         }
+
+        renderConfigurationWarnings()
 
         selectedPairHash?.let { hash ->
             val pair = data.pairs.firstOrNull { it.token.contractHash.equals(hash, ignoreCase = true) }
@@ -1895,7 +1957,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun renderAdmin(data: ForgeDashboard) {
-        sectionTitle("Admin", "TokenFactory owner controls for mobile")
+        sectionTitle("Admin", "Read-only TokenFactory owner view for mobile")
 
         val config = data.factoryConfig
         if (config == null) {
@@ -1924,34 +1986,44 @@ class MainActivity : ComponentActivity() {
             ).withTopPadding(10))
         })
 
+        content.addView(card(stroke = GOLD).apply {
+            addView(text("Admin writes are web-only in this milestone", 17, TEXT, Typeface.BOLD))
+            addView(text(
+                "Android can prove owner identity and read TokenFactory state. Fee changes, pause/resume, platform-fee propagation, template upgrades, and claims stay on web FORGE until each operation has a dedicated mobile signing test.",
+                13,
+                MUTED,
+                Typeface.NORMAL
+            ).withTopPadding(6))
+        })
+
         adminAction(
             title = "Creation Fee",
             body = "Current: ${formatQuoteAmount(config.creationFee, "GAS")}",
-            enabled = ownerConnected,
+            enabled = false,
             action = "Set Fee"
         )
         adminAction(
             title = "Operation Fee",
             body = "Current: ${formatQuoteAmount(config.operationFee, "GAS")}",
-            enabled = ownerConnected,
+            enabled = false,
             action = "Set Fee"
         )
         adminAction(
             title = if (config.paused) "Resume TokenFactory" else "Pause TokenFactory",
             body = "Pausing blocks token creation and factory-managed token changes.",
-            enabled = ownerConnected,
+            enabled = false,
             action = if (config.paused) "Resume" else "Pause"
         )
         adminAction(
             title = "Platform Fee Policy",
             body = "Propagate TokenFactory platform-fee policy to all eligible tokens.",
-            enabled = ownerConnected,
+            enabled = false,
             action = "Review"
         )
         adminAction(
             title = "Claim Factory Assets",
             body = "Claim non-zero TokenFactory balances from the owner wallet.",
-            enabled = ownerConnected,
+            enabled = false,
             action = "Claim"
         )
     }
@@ -1964,7 +2036,7 @@ class MainActivity : ComponentActivity() {
                 isEnabled = enabled
                 alpha = if (enabled) 1f else 0.45f
                 setOnClickListener {
-                    Toast.makeText(this@MainActivity, "WalletConnect admin signing comes next.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Use web FORGE for TokenFactory admin writes in this milestone.", Toast.LENGTH_SHORT).show()
                 }
             }, fullButtonParams(top = 12))
         })
@@ -2192,6 +2264,10 @@ class MainActivity : ComponentActivity() {
 
     private fun connectNeon() {
         Log.i(TAG, "connectNeon ready=${ForgeWalletConnect.isReady} harness=${MobileWalletHarness.enabled}")
+        if (!isWalletConnectConfigured()) {
+            Toast.makeText(this, "WalletConnect is disabled: configure FORGE_REOWN_PROJECT_ID.", Toast.LENGTH_LONG).show()
+            return
+        }
         if (!ForgeWalletConnect.isReady) {
             Toast.makeText(this, "WalletConnect is still initializing.", Toast.LENGTH_SHORT).show()
             return
@@ -2312,7 +2388,7 @@ class MainActivity : ComponentActivity() {
         connectedWalletAddress = signAddress ?: account?.address ?: appKitSessionAddress
         connectedChainId = signChainId ?: account?.chain?.id ?: appKitSessionChainId
         connectButton.text = connectedWalletAddress?.let { compactAddress(it) } ?: "Connect"
-        connectButton.isEnabled = connectedWalletAddress != null || ForgeWalletConnect.isReady
+        connectButton.isEnabled = connectedWalletAddress != null || (isWalletConnectConfigured() && ForgeWalletConnect.isReady)
         syncWalletNetworkValidation(
             listOfNotNull(signSession?.topic, connectedChainId, connectedWalletAddress)
                 .joinToString("|")
